@@ -106,7 +106,11 @@ function statusToResult(
 				exitCode: 1,
 				// No Stop hook fired, so there is no deliverable. Claude exiting is
 				// never success, even though the turn ended.
-				error: `Claude exited in pane ${runner.paneId} before completing the task${turn.note ? `: ${turn.note}` : "."}`,
+				// Claude reports reason "other" for an externally killed pane, which
+				// tells an operator nothing; only append a note that adds meaning.
+				error:
+					`Claude exited in pane ${runner.paneId} before completing the task, so no result was produced` +
+					`${turn.note && turn.note !== "other" ? `: ${turn.note}.` : ". The pane was closed or Claude was quit."}`,
 				turnStatus: turn.status,
 				runner,
 			};

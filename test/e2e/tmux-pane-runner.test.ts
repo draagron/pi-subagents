@@ -51,6 +51,14 @@ function killSession(name: string): void {
 	}
 }
 
+function killPane(paneId: string): void {
+	try {
+		execFileSync("tmux", ["kill-pane", "-t", paneId], { stdio: "ignore" });
+	} catch {
+		// Already gone.
+	}
+}
+
 function sleepSync(seconds: number): void {
 	execFileSync("sleep", [String(seconds)]);
 }
@@ -362,6 +370,44 @@ describe("tmux-pane runner e2e", { skip: skipReason, timeout: 600_000 }, () => {
 		assert.equal(result.turnStatus, "completed", "the deadline must not run while blocked on a human");
 		assert.equal(result.timedOut ?? false, false);
 		assert.match(result.output, /PERMISSION_TEST/);
+	});
+
+	it("fails fast when its pane is killed externally mid-turn", async () => {
+		const repo = makeRepo("pi-tmux-e2e-killed-");
+		trustRepoOnce(repo);
+		const asyncDir = path.join(path.dirname(repo), "async");
+		fs.mkdirSync(asyncDir, { recursive: true });
+
+		// Generous deadline: if the death were only noticed by the timeout, this
+		// would take timeoutMs rather than seconds, and the assertion below on
+		// elapsed time would catch that regression.
+		const timeoutMs = 45_000;
+		const startedAt = Date.now();
+		let paneId = "";
+
+		const pending = runTmuxPane(baseInput({
+			identity: { runId: "e2e-killed", stepIndex: 0, childIndex: 0, agent: "killed-agent" },
+			cwd: repo,
+			asyncDir,
+			stepIndex: 0,
+			prompt: "Count slowly from 1 to 3000, one number per line, nothing else. Do not use any tools.",
+			timeoutMs,
+			onRunnerStatus: (r: { paneId?: string }) => { paneId = r.paneId ?? ""; },
+		}));
+
+		while (!paneId && Date.now() - startedAt < 60_000) await new Promise((r) => setTimeout(r, 200));
+		assert.ok(paneId, "the pane should have been created");
+		await new Promise((r) => setTimeout(r, 7_000));
+		killPane(paneId);
+
+		const result = await pending;
+		const elapsed = Date.now() - startedAt;
+
+		assert.equal(result.turnStatus, "session_ended");
+		assert.notEqual(result.exitCode, 0, "a killed pane must never report success");
+		assert.equal(result.output, "", "there is no deliverable without a Stop hook");
+		assert.match(result.error ?? "", /exited in pane .* before completing the task/);
+		assert.ok(elapsed < timeoutMs - 5_000, `death should be seen via the SessionEnd hook, not the deadline (took ${elapsed}ms)`);
 	});
 
 	it("refuses to submit into an untrusted repository instead of answering the dialog", async () => {
