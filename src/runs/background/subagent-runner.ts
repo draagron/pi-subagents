@@ -1191,6 +1191,8 @@ interface SingleStepContext {
 	onChildEvent?: (event: ChildEvent) => void;
 	onWriterProcess?: (writer: { state: "none" | "spawning" } | { state: "running"; pid: number }) => void;
 	onExternalProcess?: (process: ExternalProcessStatus) => void;
+	/** Report runner identity once it exists (a tmux pane is created mid-step). */
+	onRunnerStatus?: (runner: SubagentRunnerStatus) => void;
 	onExternalJob?: (status: ExternalJobStatus) => void;
 	skipAcceptance?: () => boolean;
 	orcaProgressTab?: OrcaProgressTab;
@@ -1395,6 +1397,7 @@ async function runSingleStepInner(
 			registerStop: ctx.registerStop,
 			timeoutMessage: ctx.timeoutMessage,
 			stopMessage: ctx.stopMessage,
+			onRunnerStatus: ctx.onRunnerStatus,
 			onToolEvent: (toolName: string) => ctx.orcaProgressTab?.append(`[tool] ${toolName}\n`),
 			onNeedsAttention: (message: string) => ctx.orcaProgressTab?.append(`[blocked] ${message}\n`),
 		}));
@@ -2031,7 +2034,17 @@ type RunnerStatusStep = NonNullable<AsyncStatus["steps"]>[number] & {
 	description?: string;
 };
 
-function externalRunnerStatus(runner: SubagentStep["runner"]): ExternalCliRunnerStatus | ExternalJobRunnerStatus | undefined {
+function externalRunnerStatus(runner: SubagentStep["runner"]): SubagentRunnerStatus | undefined {
+	if (runner?.type === "tmux-pane") {
+		// Identity is unknown until the pane is spawned; onRunnerStatus fills it
+		// in. The type and capabilities are known from config and are reported
+		// immediately, as the other runners do.
+		return {
+			type: "tmux-pane",
+			program: "claude",
+			capabilities: { stop: true, steer: true, resume: true, structuredOutput: false, toolEvents: true, usage: "unavailable", turnBudget: false, toolBudget: false },
+		};
+	}
 	if (runner?.type === "external-cli") {
 		return {
 			type: "external-cli",
@@ -2587,6 +2600,11 @@ async function runSubagent(
 	};
 	const updateExternalProcess = (index: number, process: ExternalProcessStatus): void => {
 		requiredStatusStep(statusPayload, index).externalProcess = process;
+		statusPayload.lastUpdate = Date.now();
+		writeStatusPayload();
+	};
+	const updateRunnerStatus = (index: number, runner: SubagentRunnerStatus): void => {
+		requiredStatusStep(statusPayload, index).runner = runner;
 		statusPayload.lastUpdate = Date.now();
 		writeStatusPayload();
 	};
@@ -3882,6 +3900,7 @@ async function runSubagent(
 					onChildEvent: (event) => updateStepFromChildEvent(fi, event),
 					onWriterProcess,
 					onExternalProcess: (process) => updateExternalProcess(fi, process),
+					onRunnerStatus: (runner) => updateRunnerStatus(fi, runner),
 					onExternalJob: (externalJob) => updateExternalJob(fi, externalJob),
 					skipAcceptance: () => timedOut || stopped,
 				}), config.deadlineAt);
@@ -4267,6 +4286,7 @@ async function runSubagent(
 							onChildEvent: (event) => updateStepFromChildEvent(fi, event),
 							onWriterProcess,
 							onExternalProcess: (process) => updateExternalProcess(fi, process),
+					onRunnerStatus: (runner) => updateRunnerStatus(fi, runner),
 							onExternalJob: (externalJob) => updateExternalJob(fi, externalJob),
 							skipAcceptance: () => timedOut || stopped,
 						}), config.deadlineAt);
@@ -4588,6 +4608,7 @@ async function runSubagent(
 				onChildEvent: (event) => updateStepFromChildEvent(flatIndex, event),
 				onWriterProcess,
 				onExternalProcess: (process) => updateExternalProcess(flatIndex, process),
+				onRunnerStatus: (runner) => updateRunnerStatus(flatIndex, runner),
 				onExternalJob: (externalJob) => updateExternalJob(flatIndex, externalJob),
 				skipAcceptance: () => timedOut || stopped,
 				}), config.deadlineAt);

@@ -13,7 +13,7 @@
  */
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -247,6 +247,72 @@ describe("tmux-pane runner e2e", { skip: skipReason, timeout: 600_000 }, () => {
 			await new Promise((resolve) => setTimeout(resolve, 250));
 		}
 		assert.ok(promptIds().size >= 2, `the steer should reach Claude as its own prompt, saw ${promptIds().size}`);
+	});
+
+	it("runs through the async runner's dispatch branch and persists status and result", async () => {
+		// Drives src/runs/background/subagent-runner.ts as a real process, the way
+		// an async run does, so the dispatch branch itself is covered rather than
+		// runTmuxPane being called directly.
+		const repo = makeRepo("pi-tmux-e2e-dispatch-");
+		trustRepoOnce(repo);
+		const dir = path.dirname(repo);
+		const asyncDir = path.join(dir, "async");
+		fs.mkdirSync(asyncDir, { recursive: true });
+		const resultPath = path.join(dir, "result.json");
+		const configPath = path.join(dir, "config.json");
+
+		fs.writeFileSync(configPath, JSON.stringify({
+			id: "tmux-pane-dispatch",
+			sessionId: "session-tmux-pane",
+			steps: [{
+				agent: "pane-agent",
+				task: "Reply with exactly the single word READY and nothing else. Do not use any tools.",
+				runner: { type: "tmux-pane", program: "claude", permissionMode: "acceptEdits", layout: "window" },
+				systemPrompt: "You are a test child.",
+				systemPromptMode: "replace",
+				inheritProjectContext: false,
+				inheritSkills: false,
+			}],
+			resultPath,
+			cwd: repo,
+			placeholder: "{previous}",
+			artifactConfig: { enabled: false },
+			asyncDir,
+			resultMode: "single",
+		}));
+
+		const repoRoot = path.resolve(import.meta.dirname, "../..");
+		const childEnv = { ...process.env };
+		// Force the dedicated host session rather than inheriting this process's.
+		delete childEnv.TMUX;
+		delete childEnv.TMUX_PANE;
+		const exitCode = await new Promise<number | null>((resolve, reject) => {
+			const child = spawn(
+				process.execPath,
+				[path.join(repoRoot, "node_modules/jiti/lib/jiti-cli.mjs"), path.join(repoRoot, "src/runs/background/subagent-runner.ts"), configPath],
+				{ cwd: repoRoot, stdio: "inherit", shell: false, env: childEnv },
+			);
+			child.once("error", reject);
+			child.once("close", resolve);
+		});
+		assert.equal(exitCode, 0);
+
+		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8"));
+		assert.equal(status.state, "complete");
+		assert.equal(status.steps[0].runner.type, "tmux-pane");
+		assert.equal(status.steps[0].runner.program, "claude");
+		assert.ok(status.steps[0].runner.paneId, "the pane id must be recorded for operators");
+		assert.match(status.steps[0].runner.paneName, /^pi-tmux-pane-dispatch-s0-c0-pane-agent$/);
+		assert.equal(status.steps[0].runner.capabilities.usage, "unavailable");
+		assert.equal(status.steps[0].runner.capabilities.steer, true);
+
+		assert.match(fs.readFileSync(path.join(asyncDir, "output-0.log"), "utf-8"), /READY/);
+		assert.match(fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8"), /subagent\.step\.completed/);
+
+		const result = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
+		assert.equal(result.success, true);
+		assert.equal(result.results[0].runner.type, "tmux-pane");
+		assert.match(result.results[0].output, /READY/);
 	});
 
 	it("refuses to submit into an untrusted repository instead of answering the dialog", async () => {

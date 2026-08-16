@@ -1372,13 +1372,20 @@ export interface ExternalJobRunnerStatus {
 export interface TmuxPaneRunnerStatus {
 	type: "tmux-pane";
 	program: "claude";
-	paneId: string;
+	/**
+	 * Pane identity, populated once the pane actually exists.
+	 *
+	 * The step's runner record is written when the step is queued, before any
+	 * pane has been created, so these are absent until the spawn completes.
+	 * Treat their absence as "not spawned yet", never as "no pane".
+	 */
+	paneId?: string;
 	/** Unique per logical child: pi-<runId>-s<step>-c<child>-<agent>. */
-	paneName: string;
-	claudeSessionId: string;
-	stateDir: string;
+	paneName?: string;
+	claudeSessionId?: string;
+	stateDir?: string;
 	transcriptPath?: string;
-	cwd: string;
+	cwd?: string;
 	capabilities: {
 		stop: true;
 		steer: true;

@@ -65,6 +65,8 @@ export interface TmuxPaneRunInput {
 	registerStop?: (stop: (() => void) | undefined) => void;
 	timeoutMessage?: string;
 	stopMessage?: string;
+	/** Called once the pane exists, so status can carry real pane identity. */
+	onRunnerStatus?: (runner: TmuxPaneRunnerStatus) => void;
 	onToolEvent?: (toolName: string) => void;
 	onNeedsAttention?: (message: string) => void;
 	onProgress?: (turn: TurnRecord) => void;
@@ -84,7 +86,7 @@ function statusToResult(
 			return {
 				output,
 				exitCode: 1,
-				error: input.timeoutMessage ?? `Subagent timed out. Pane ${runner.paneId} was left running for inspection.`,
+					error: input.timeoutMessage ?? `Subagent timed out. Pane ${runner.paneId} was left running for inspection${runner.transcriptPath ? `; partial work is in ${runner.transcriptPath}` : ""}.`,
 				timedOut: true,
 				turnStatus: turn.status,
 				runner,
@@ -93,7 +95,7 @@ function statusToResult(
 			return {
 				output,
 				exitCode: 1,
-				error: input.stopMessage ?? `Subagent interrupted. Pane ${runner.paneId} is paused with its context intact.`,
+				error: input.stopMessage ?? `Subagent interrupted. Pane ${runner.paneId} is paused with its context intact${runner.transcriptPath ? `; partial work is in ${runner.transcriptPath}` : ""}.`,
 				paused: true,
 				turnStatus: turn.status,
 				runner,
@@ -250,6 +252,8 @@ export async function runTmuxPane(input: TmuxPaneRunInput): Promise<TmuxPaneRunR
 		},
 	};
 
+	input.onRunnerStatus?.(runner);
+
 	const controller = new AbortController();
 	let stopRequested = false;
 	let timeoutRequested = false;
@@ -296,6 +300,15 @@ export async function runTmuxPane(input: TmuxPaneRunInput): Promise<TmuxPaneRunR
 			...(input.onProgress ? { onProgress: input.onProgress } : {}),
 		});
 
+		// Claude reports its transcript path through the hook stream, so it is only
+		// known once events have flowed. It matters most on the paths that produce
+		// no deliverable - stop, timeout, session_ended - where it is the operator's
+		// only route back to the child's partial work.
+		if (pane.transcriptPath) {
+			runner.transcriptPath = pane.transcriptPath;
+			input.onRunnerStatus?.(runner);
+		}
+
 		const result = statusToResult(finished, runner, input);
 		if (stopRequested) {
 			return {
@@ -303,7 +316,7 @@ export async function runTmuxPane(input: TmuxPaneRunInput): Promise<TmuxPaneRunR
 				stopped: true,
 				paused: false,
 				exitCode: 1,
-				error: input.stopMessage ?? "Subagent stopped by user.",
+				error: input.stopMessage ?? `Subagent stopped by user.${runner.transcriptPath ? ` Partial work is in ${runner.transcriptPath}.` : ""}`,
 			};
 		}
 		if (timeoutRequested) {
@@ -312,7 +325,7 @@ export async function runTmuxPane(input: TmuxPaneRunInput): Promise<TmuxPaneRunR
 				timedOut: true,
 				paused: false,
 				exitCode: 1,
-				error: input.timeoutMessage ?? `Subagent timed out. Pane ${runner.paneId} was left running for inspection.`,
+				error: input.timeoutMessage ?? `Subagent timed out. Pane ${runner.paneId} was left running for inspection${runner.transcriptPath ? `; partial work is in ${runner.transcriptPath}` : ""}.`,
 			};
 		}
 		return result;
