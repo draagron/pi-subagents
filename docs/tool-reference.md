@@ -329,7 +329,7 @@ Every foreground or background child keeps running through its normal native Pi 
 
 The observer supports macOS and Linux and is disabled on Windows. It requires executable `orca` on `PATH` (or `PI_SUBAGENT_ORCA_BINARY`) and a running Orca runtime that recognizes the child cwd. Availability and tab creation are best-effort: failures never fail, stop, or delay the subagent. Set `orcaProgressTabs.enabled` to `false` to guarantee that no Orca command or tab is created.
 
-Agent profile `runner.type` supports native Pi (the default), `external-cli`, and `external-job`. Orca is intentionally not a profile runner and does not own subagent execution, completion, cancellation, artifacts, or result delivery.
+Agent profile `runner.type` supports native Pi (the default), `external-cli`, `external-job`, and `tmux-pane`. Orca is intentionally not a profile runner and does not own subagent execution, completion, cancellation, artifacts, or result delivery.
 
 ## External CLI agent profiles
 
@@ -347,6 +347,48 @@ async: true
 Supported: status artifacts, stdout/stderr logs, timeout, and stop. Full stdout and stderr are written to log files, while the in-memory final stdout response and stderr error are limited to their last 64 KiB.
 
 Intentionally unsupported: foreground/clarify, steer/resume/interrupt-as-pause, Pi models/tools/extensions, skills, structured output, nested subagents, and fallback models.
+
+## tmux pane agent profiles
+
+Agent profiles can opt into hosting an interactive Claude Code session in a tmux pane instead of a Pi child. This exists because `claude -p` requires API-key billing and does not work on a Claude subscription, so a one-shot stdin/stdout process cannot host Claude at all; completion has to come from Claude Code hooks, which only exist in an interactive session.
+
+The runner adds no install dependency, but `tmux` and `claude` must both exist on `PATH` at runtime, and Claude must already be signed in. It is async-only and POSIX-only, and is rejected on Windows.
+
+```yaml
+runner:
+  type: tmux-pane
+  program: claude
+  model: opus
+  permissionMode: acceptEdits
+  layout: window
+async: true
+```
+
+| Field | Meaning |
+|---|---|
+| `program` | Interactive CLI to host. `claude` only. |
+| `model` | Claude model alias such as `opus`. Not a Pi model id, and not resolved through Pi's model registry. |
+| `permissionMode` | One of `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`. |
+| `allowedTools` / `disallowedTools` | Passed to Claude. Advisory: enforced by Claude, not by Pi. |
+| `addDirs` | Extra directories Claude may access. |
+| `layout` | `window` (default) or `split`. |
+| `size` | Size for `split` layout, e.g. `45%`. |
+| `reuse` | Reuse one pane per agent across runs to keep context. Refused for parallel or worktree children. |
+| `extraArgs` | Extra argv appended verbatim. |
+
+Each logical child gets its own pane, named `pi-<runId>-s<step>-c<child>-<agent>`, so a `runs.all` fan-out of one agent produces one pane and one Claude conversation per child rather than interleaving them. Worktree isolation works normally: the pane opens at the child's resolved cwd.
+
+The task is written to a file and delivered by bracketed paste, so no quoting or escaping path exists. Completion comes from the `Stop` hook, whose `last_assistant_message` is the child's output. Tool events come from `PreToolUse`, and a permission prompt raises `Notification`, which surfaces as needs-attention and pauses the turn deadline so waiting on a human does not consume the run's timeout.
+
+Supported: status artifacts, output logs, timeout, stop, interrupt-as-pause, resume, tool events, and steer.
+
+**Steering has next-turn semantics.** Claude queues input pasted while it is mid-turn, so a steer aimed at a running turn is picked up at the next turn boundary rather than altering the turn in flight. Acknowledgments reflect this: a successful paste acks `queued`, and `delivered` is only reported when Claude's own `UserPromptSubmit` is observed. This differs from native Pi steering, which reaches the running turn.
+
+Intentionally unsupported, and rejected before launch rather than ignored: foreground/clarify, structured output, usage budgets, turn budgets, tool budgets, `context: "fork"`, Pi models/tools/extensions/skills, and native Pi child permissions. Usage and cost are reported as `"unavailable"` rather than absent, because Claude Code hooks expose no token or cost data.
+
+A pane cannot be held to a capability ceiling: Pi enforces a ceiling by building the child's tool set, and a foreign agent picks its own tools. When a ceiling is active, a `tmux-pane` launch is refused rather than run under an unenforced one.
+
+Claude shows a workspace trust dialog the first time it is used in an untrusted repository. The runner detects it and fails with a specific error instead of pasting into it, since a paste would silently accept a security prompt. Trust is keyed to the git repository, so accepting once covers every managed worktree of that repository.
 
 ## Session sharing
 

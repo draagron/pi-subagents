@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Add `runner.type: tmux-pane`, which runs a child as an interactive Claude Code session in a tmux pane, with per-child pane identity, hook-driven turn completion, tool events, needs-attention that pauses the turn deadline, stop, interrupt-as-pause, resume, and steer. Async-only and POSIX-only, and refused while a capability ceiling is active because Pi cannot constrain a foreign agent's tools.
 - Add stable-key `runs.steer` to `workflowScript`, with foreground and async transport routing, structured receipts, trace entries, and unawaited-call enforcement (#1186).
 - Document and cover rolling `workflowScript` fanout with `runs.run`, `Promise.race`, `runs.steer`, and `Promise.all` instead of adding separate child-run event helpers (#1187).
 - Add `runner.type: external-job` with the exported provider bridge, Surf GPT Pro `gpt-pro` profile, and docs for external advisor data boundaries (#1189).

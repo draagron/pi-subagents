@@ -67,6 +67,29 @@ async: true
 Review the task and return advice only. Do not edit files.
 ```
 
+Claude Code can also run as a full interactive child with `runner.type: tmux-pane`, which hosts a real Claude Code session in a tmux pane. Unlike the advisor profile above, that child can use its own tools and edit files. It requires `tmux` and `claude` on `PATH` and a signed-in Claude CLI, and exists because `claude -p` needs API-key billing and does not work on a subscription:
+
+```yaml
+---
+name: claude-implementer
+description: Implements a bounded change using an interactive Claude Code pane
+runner:
+  type: tmux-pane
+  program: claude
+  model: opus
+  permissionMode: acceptEdits
+  layout: window
+async: true
+---
+
+Your final message of each turn is the deliverable and is read programmatically.
+Make it complete and self-contained: findings, absolute file paths, what you
+changed, and anything you deliberately did not do.
+Do not ask clarifying questions; state assumptions and proceed.
+```
+
+The final assistant message of each turn is the child's output, so the agent body should say so explicitly: nothing else the child prints is read. See "tmux pane agent profiles" in the tool reference for the full field list, the capability boundary, and the next-turn steering semantics.
+
 ### Advisory runner data boundary
 
 Native `oracle` runs inside Pi and can use its configured read tools. `claude-advisor` sends the assembled prompt to the configured local external CLI through stdin. `gpt-pro` sends the assembled prompt to the registered Surf provider. Provider options and a prompt digest are persisted in Pi run state. The prompt text is delivered through the local host bridge to the provider and is not stored in the public result payload. Do not place secrets in advisory prompts unless the target provider is approved to receive them.

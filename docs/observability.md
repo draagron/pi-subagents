@@ -183,6 +183,8 @@ Debug artifacts live under `{sessionDir}/subagent-artifacts/`, `.pi/subagents/ar
 
 Metadata records timing, usage, exit code, final model, attempted models, fallback attempt outcomes, and the resolved acceptance ledger with its parsed child report.
 
+For `tmux-pane` steps, the step `runner` record carries the pane id, pane name, Claude session id, and pane state dir, plus a capability block whose `usage` field is the string `"unavailable"` rather than a boolean. That is a deliberate tri-state: it distinguishes "no usage reported yet" from "this runner can never report usage". Claude Code hook payloads carry no token or cost data, so usage and cost are never populated for these steps and must not be inferred from an absent value.
+
 For npm package projects, project-scoped artifacts need a `.npmignore` rule (or `.gitignore` when no `.npmignore` exists) or a `files` allowlist that does not include `.pi/subagents/`. pi-subagents warns at launch when these package settings can include the artifacts. Use `artifactDir: "session"` or `"temp"` to keep them outside the package worktree.
 
 ## Sessions

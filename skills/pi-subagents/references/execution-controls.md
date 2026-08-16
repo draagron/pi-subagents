@@ -26,6 +26,16 @@ An agent may set `runner.type: external-cli` with a non-empty `command`, optiona
 
 External CLI profiles are async-only and one-shot. They support lifecycle artifacts, stdout/stderr logs, timeout, and stop. Full stdout and stderr are retained in their log files, while the final stdout response and stderr error kept in memory are each limited to their last 64 KiB. They do not support foreground/clarify, steer/resume/interrupt-as-pause, Pi models/tools/extensions/skills, tool or turn budgets, structured output, nested subagents, fallbacks, or sessions.
 
+### tmux pane profiles
+
+An agent may set `runner.type: tmux-pane` to host an interactive Claude Code session in a tmux pane. `program` is `claude` only; optional fields are `model` (a Claude alias, not a Pi model id), `permissionMode`, `allowedTools`, `disallowedTools`, `addDirs`, `layout`, `size`, `reuse`, and `extraArgs`. Both `tmux` and `claude` must exist on `PATH`; pi-subagents adds no install dependency. The profile exists because `claude -p` requires API-key billing and cannot host Claude on a subscription, so completion must come from Claude Code hooks in an interactive session.
+
+tmux pane profiles are async-only and POSIX-only. Each logical child gets its own pane, named `pi-<runId>-s<step>-c<child>-<agent>`, so a parallel fan-out of one agent does not put several children in one Claude conversation. They support lifecycle artifacts, output logs, timeout, stop, interrupt-as-pause, resume, tool events, and steer. The child's output is the `Stop` hook's `last_assistant_message`. A permission prompt raises needs-attention and pauses the turn deadline.
+
+Steering reaches the child's next turn, not the turn in flight: Claude queues input pasted mid-turn. A successful paste is acknowledged `queued`, and `delivered` only when Claude's own `UserPromptSubmit` is observed.
+
+They do not support foreground/clarify, structured output, usage/turn/tool budgets, `context: "fork"`, Pi models/tools/extensions/skills, native Pi permissions, or nested Pi subagents. Each is rejected before launch rather than ignored. Usage is reported as `"unavailable"`, since Claude Code hooks carry no token or cost data. `allowedTools` is enforced by Claude and is advisory from Pi's side, so a launch is refused outright while a capability ceiling is active.
+
 ### External job profiles
 
 An agent may set `runner.type: external-job` with a non-empty `provider` and optional JSON `options`. The bundled `gpt-pro` agent uses provider `surf-oracle`. The provider must be registered in the host Pi process through `pi-subagents/external-job-provider`; the async runner talks to that parent-owned registry through a local operation bridge.
