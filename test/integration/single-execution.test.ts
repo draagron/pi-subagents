@@ -787,6 +787,36 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(fs.existsSync(markerPath), false);
 	});
 
+	it("rejects unsupported fields for tmux-pane agents before any pane is spawned", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const executor = makeExecutor([
+			makeAgent("pane", { runner: { type: "tmux-pane", program: "claude" } }),
+		]);
+		// Fork context is rejected too, but behind an earlier parent-session check
+		// that needs a persisted session, so it is covered by the external-runner
+		// fork test rather than duplicated here.
+		const cases: [Record<string, unknown>, RegExp][] = [
+			[{ model: "mock/override" }, /does not support: model override/],
+			[{ outputSchema: { type: "object" } }, /does not support: .*structured output/],
+		];
+		for (const [index, [params, expected]] of cases.entries()) {
+			const result = await executor.execute(
+				`pane-reject-${index}`,
+				{ agent: "pane", task: "Run in a pane", async: true, ...params },
+				new AbortController().signal,
+				undefined,
+				{
+					...makeMinimalCtx(tempDir),
+					modelRegistry: { getAvailable: () => [{ provider: "other", id: "known" }] },
+				},
+			);
+			assert.equal(result.isError, true, `case ${index} should be rejected`);
+			assert.match(result.content[0]?.text ?? "", /runner\.type='tmux-pane'/);
+			assert.match(result.content[0]?.text ?? "", expected);
+		}
+		// Nothing may reach a runner: these are pre-launch refusals.
+		assert.equal(mockPi.callCount(), 0);
+	});
+
 	it("rejects explicit model overrides for external CLI agents", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		const executor = makeExecutor([
 			makeAgent("external", {

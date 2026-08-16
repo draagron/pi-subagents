@@ -206,10 +206,22 @@ export class Tmux {
 		return paneId;
 	}
 
-	/** Ensure a detached session exists to host panes when pi is not inside tmux. */
+	/**
+	 * Ensure a detached session exists to host panes when pi is not inside tmux.
+	 *
+	 * Idempotent under concurrency. `has-session` followed by `new-session` is a
+	 * check-then-act race, and a parallel fan-out runs it from several children
+	 * at once: they all miss, they all create, and every loser gets "duplicate
+	 * session". Losing that race means the session now exists, which is success.
+	 */
 	async ensureSession(name: string, cwd: string): Promise<void> {
 		if ((await this.tryRun(["has-session", "-t", name])) !== null) return;
-		await this.run(["new-session", "-d", "-s", name, "-c", cwd]);
+		try {
+			await this.run(["new-session", "-d", "-s", name, "-c", cwd]);
+		} catch (error) {
+			if ((await this.tryRun(["has-session", "-t", name])) !== null) return;
+			throw error;
+		}
 	}
 
 	/**

@@ -430,7 +430,10 @@ export class ClaudePane {
 					options.onProgress(turn);
 				}
 			}, tickMs);
-			ticker.unref?.();
+			// Deliberately NOT unref'd. This timer is the only thing awaiting the
+			// turn, so unref'ing it lets the process exit mid-turn whenever the
+			// pane is the sole work in flight. Every other timer here is unref'd
+			// precisely because this one holds the loop open.
 
 			options.signal?.addEventListener("abort", onAbort, { once: true });
 			if (options.signal?.aborted) onAbort();
