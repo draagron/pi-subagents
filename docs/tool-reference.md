@@ -382,6 +382,10 @@ The task is written to a file and delivered by bracketed paste, so no quoting or
 
 Supported: status artifacts, output logs, timeout, stop, interrupt-as-pause, resume, tool events, and steer.
 
+A tool permission prompt raises Claude's `Notification` hook, which surfaces as needs-attention and pauses the turn deadline. Note the hook fires for tool permission prompts but **not** for plan-mode approval: a child left waiting at a plan-approval dialog is not reported as blocked and its deadline keeps running, so prefer a non-plan `permissionMode` for unattended children.
+
+`extraArgs` must not contain `--settings` or `--session-id`; both are rejected at validation. A second `--settings` replaces the generated hook configuration rather than merging with it, which would leave the child with no completion signal at all.
+
 **Steering has next-turn semantics.** Claude queues input pasted while it is mid-turn, so a steer aimed at a running turn is picked up at the next turn boundary rather than altering the turn in flight. Acknowledgments reflect this: a successful paste acks `queued`, and `delivered` is only reported when Claude's own `UserPromptSubmit` is observed. This differs from native Pi steering, which reaches the running turn.
 
 Intentionally unsupported, and rejected before launch rather than ignored: foreground/clarify, structured output, usage budgets, turn budgets, tool budgets, `context: "fork"`, Pi models/tools/extensions/skills, and native Pi child permissions. Usage and cost are reported as `"unavailable"` rather than absent, because Claude Code hooks expose no token or cost data.

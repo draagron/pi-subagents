@@ -315,6 +315,55 @@ describe("tmux-pane runner e2e", { skip: skipReason, timeout: 600_000 }, () => {
 		assert.match(result.results[0].output, /READY/);
 	});
 
+	it("raises needs-attention on a real permission prompt and pauses the deadline", async () => {
+		const repo = makeRepo("pi-tmux-e2e-attention-");
+		// A project-level ask rule forces a genuine permission prompt. It must go
+		// here and NOT in extraArgs: a second --settings replaces the generated
+		// hook config rather than merging, leaving the child with no hook stream.
+		fs.mkdirSync(path.join(repo, ".claude"), { recursive: true });
+		fs.writeFileSync(path.join(repo, ".claude", "settings.json"), JSON.stringify({ permissions: { ask: ["Bash"] } }));
+		trustRepoOnce(repo);
+		const asyncDir = path.join(path.dirname(repo), "async");
+		fs.mkdirSync(asyncDir, { recursive: true });
+
+		const timeoutMs = 15_000;
+		const holdMs = 30_000; // deliberately longer than timeoutMs
+		const startedAt = Date.now();
+		const attention: string[] = [];
+		let paneId = "";
+
+		const pending = runTmuxPane(baseInput({
+			identity: { runId: "e2e-attn", stepIndex: 0, childIndex: 0, agent: "attn-agent" },
+			cwd: repo,
+			asyncDir,
+			stepIndex: 0,
+			permissionMode: "manual",
+			prompt: "Use the Bash tool to run exactly: echo PERMISSION_TEST. Then reply with the output.",
+			timeoutMs,
+			onRunnerStatus: (r: { paneId?: string }) => { paneId = r.paneId ?? ""; },
+			onNeedsAttention: (message: string) => attention.push(message),
+		}));
+
+		// Leave the prompt unanswered past the deadline, then approve it. If the
+		// blocked clock were not paused, the turn would have timed out by now.
+		let approved = false;
+		while (!approved && Date.now() - startedAt < 90_000) {
+			await new Promise((resolve) => setTimeout(resolve, 500));
+			if (!paneId || attention.length === 0) continue;
+			if (Date.now() - startedAt < holdMs) continue;
+			approved = true;
+			tmux(["send-keys", "-t", paneId, "Enter"]);
+		}
+		assert.ok(approved, "the permission prompt never appeared");
+
+		const result = await pending;
+		assert.ok(attention.length > 0, "a permission prompt must surface as needs-attention");
+		assert.match(attention[0] ?? "", /permission/i);
+		assert.equal(result.turnStatus, "completed", "the deadline must not run while blocked on a human");
+		assert.equal(result.timedOut ?? false, false);
+		assert.match(result.output, /PERMISSION_TEST/);
+	});
+
 	it("refuses to submit into an untrusted repository instead of answering the dialog", async () => {
 		// No trustRepoOnce here: a fresh repo is untrusted, so Claude opens its
 		// trust dialog and a paste would land in it.

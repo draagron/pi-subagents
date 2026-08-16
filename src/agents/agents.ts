@@ -1595,10 +1595,23 @@ export function parseTmuxPaneRunnerFrontmatter(runner: Record<string, unknown>, 
 	if (runner.reuse !== undefined && typeof runner.reuse !== "boolean") {
 		throw new Error(`Agent '${agentName}' tmux-pane runner reuse must be a boolean.`);
 	}
+	const RUNNER_OWNED_FLAGS = ["--settings", "--session-id"];
+	const extraArgsRaw = parseTmuxPaneStringArray(runner.extraArgs, agentName, "extraArgs");
+	const conflicting = (extraArgsRaw ?? []).filter((arg) => RUNNER_OWNED_FLAGS.includes(arg));
+	if (conflicting.length > 0) {
+		// A second --settings REPLACES the first rather than merging, which would
+		// silently drop the generated hook config; with no hook stream the runner
+		// never sees UserPromptSubmit or Stop and the child can only fail. The
+		// session id is pre-assigned so a dead pane can be resumed.
+		throw new Error(
+			`Agent '${agentName}' tmux-pane runner extraArgs must not contain ${conflicting.join(", ")}: the runner owns these flags. ` +
+				`A second --settings replaces the generated hook configuration, which would leave the child with no completion signal.`,
+		);
+	}
 	const allowedTools = parseTmuxPaneStringArray(runner.allowedTools, agentName, "allowedTools");
 	const disallowedTools = parseTmuxPaneStringArray(runner.disallowedTools, agentName, "disallowedTools");
 	const addDirs = parseTmuxPaneStringArray(runner.addDirs, agentName, "addDirs");
-	const extraArgs = parseTmuxPaneStringArray(runner.extraArgs, agentName, "extraArgs");
+	const extraArgs = extraArgsRaw;
 
 	const supported = new Set([
 		"type",

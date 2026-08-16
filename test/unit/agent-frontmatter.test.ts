@@ -286,6 +286,8 @@ Your final message of each turn is the deliverable.`);
 			["type: tmux-pane\n  allowedTools: nope", /allowedTools must be an array of non-empty strings/],
 			["type: tmux-pane\n  addDirs: [ok, 1]", /addDirs must be an array of non-empty strings/],
 			["type: tmux-pane\n  commnad: node", /unsupported fields: commnad/],
+			["type: tmux-pane\n  extraArgs: ['--settings', 'x.json']", /must not contain --settings/],
+			["type: tmux-pane\n  extraArgs: ['--session-id', 'abc']", /must not contain --session-id/],
 		];
 		for (const [index, [runner, expected]] of invalidCases.entries()) {
 			const project = fs.mkdtempSync(path.join(os.tmpdir(), `pi-subagents-invalid-tmux-pane-${index}-`));
