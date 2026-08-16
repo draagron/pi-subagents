@@ -17,6 +17,7 @@ import {
 	frontmatterNameForConfig,
 	parsePackageName,
 	mergeBuiltinAgentOverride,
+	parseTmuxPaneRunnerFrontmatter,
 	removeBuiltinAgentOverride,
 	removeBuiltinAgentOverrideFields,
 	resolveAgentName,
@@ -359,7 +360,15 @@ function applyAgentConfig(target: AgentConfig, cfg: Record<string, unknown>): st
 				&& (runner.options === undefined || (runner.options && typeof runner.options === "object" && !Array.isArray(runner.options) && isJsonSerializable(runner.options)))
 				&& Object.keys(runner).every((key) => ["type", "provider", "options"].includes(key))) {
 				target.runner = { type: "external-job", provider: runner.provider, ...(runner.options ? { options: runner.options as Record<string, unknown> } : {}) };
-			} else return "config.runner must be { type: 'pi' }, { type: 'external-cli', command: string, args?: string[], promptDelivery?: 'stdin' }, or { type: 'external-job', provider: string, options?: object }.";
+			} else if (runner.type === "tmux-pane") {
+				// Reuse the frontmatter parser so the accepted shape cannot drift
+				// between `agents.create` and agent discovery.
+				try {
+					target.runner = parseTmuxPaneRunnerFrontmatter(runner, target.name || "agent");
+				} catch (error) {
+					return error instanceof Error ? error.message : String(error);
+				}
+			} else return "config.runner must be { type: 'pi' }, { type: 'external-cli', command: string, args?: string[], promptDelivery?: 'stdin' }, { type: 'external-job', provider: string, options?: object }, or { type: 'tmux-pane', program?: 'claude', model?: string, permissionMode?: string, layout?: 'split' | 'window' }.";
 		} else return "config.runner must be an object, false, or empty string when provided.";
 	}
 	if (hasKey(cfg, "model")) {
@@ -519,7 +528,7 @@ function applyAgentConfig(target: AgentConfig, cfg: Record<string, unknown>): st
 			target.toolBudget = cfg.toolBudget as ToolBudgetConfig;
 		}
 	}
-	if (target.runner?.type === "external-cli" || target.runner?.type === "external-job") {
+	if (target.runner?.type === "external-cli" || target.runner?.type === "external-job" || target.runner?.type === "tmux-pane") {
 		const unsupported = [
 			target.tools?.length || target.mcpDirectTools?.length ? "tools" : undefined,
 			target.model ? "model" : undefined,

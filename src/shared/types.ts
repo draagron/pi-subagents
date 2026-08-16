@@ -1295,7 +1295,36 @@ export type AgentRunnerConfig =
 		type: "external-job";
 		provider: string;
 		options?: Record<string, unknown>;
+	}
+	| {
+		type: "tmux-pane";
+		/** Interactive CLI to host. v1 supports "claude" only. */
+		program?: "claude";
+		/** Claude model alias, e.g. "opus" | "sonnet". NOT a Pi model id. */
+		model?: string;
+		permissionMode?: TmuxPanePermissionMode;
+		allowedTools?: string[];
+		disallowedTools?: string[];
+		addDirs?: string[];
+		/** Default "window": keeps a fan-out off screen and reduces stray typing. */
+		layout?: "split" | "window";
+		size?: string;
+		/** Reuse a pane across runs for context continuity. Default false. */
+		reuse?: boolean;
+		/** Extra argv appended verbatim. */
+		extraArgs?: string[];
 	};
+
+export const TMUX_PANE_PERMISSION_MODES = [
+	"acceptEdits",
+	"auto",
+	"bypassPermissions",
+	"manual",
+	"dontAsk",
+	"plan",
+] as const;
+
+export type TmuxPanePermissionMode = (typeof TMUX_PANE_PERMISSION_MODES)[number];
 
 export interface ExternalCliRunnerStatus {
 	type: "external-cli";
@@ -1324,6 +1353,33 @@ export interface ExternalJobRunnerStatus {
 	};
 }
 
+export interface TmuxPaneRunnerStatus {
+	type: "tmux-pane";
+	program: "claude";
+	paneId: string;
+	/** Unique per logical child: pi-<runId>-s<step>-c<child>-<agent>. */
+	paneName: string;
+	claudeSessionId: string;
+	stateDir: string;
+	transcriptPath?: string;
+	cwd: string;
+	capabilities: {
+		stop: true;
+		steer: true;
+		resume: true;
+		structuredOutput: false;
+		toolEvents: true;
+		/**
+		 * Tri-state rather than a boolean, so observability can distinguish "no
+		 * usage reported yet" from "this runner can never report usage". Claude
+		 * Code hooks expose no token or cost data.
+		 */
+		usage: "unavailable";
+		turnBudget: false;
+		toolBudget: false;
+	};
+}
+
 export interface ExternalJobStatus {
 	provider: string;
 	providerJobId?: string;
@@ -1339,6 +1395,13 @@ export interface ExternalJobStatus {
 	startedAt?: number;
 	updatedAt?: number;
 }
+
+/**
+ * Runner status recorded on a step. Discriminate on `type` before reading
+ * runner-specific fields; several call sites narrow to a single runner and must
+ * not silently capture a new one.
+ */
+export type SubagentRunnerStatus = ExternalCliRunnerStatus | ExternalJobRunnerStatus | TmuxPaneRunnerStatus;
 
 export interface ExternalProcessStatus {
 	pid?: number;
@@ -1405,7 +1468,7 @@ export interface AsyncStatus {
 	workflowKey?: string;
 	steps?: Array<{
 		agent: string;
-		runner?: ExternalCliRunnerStatus | ExternalJobRunnerStatus;
+		runner?: SubagentRunnerStatus;
 		externalProcess?: ExternalProcessStatus;
 		externalJob?: ExternalJobStatus;
 		/** Resolved launch context for this child step. */

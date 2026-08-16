@@ -235,6 +235,77 @@ Review carefully.`);
 		assert.match(serializeAgent(gptPro), /runner:\n  type: external-job\n  provider: surf-oracle/);
 	}));
 
+	it("parses and serializes a tmux-pane runner", () => withTempHome(() => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tmux-pane-agent-"));
+		tempDirs.push(project);
+		writeAgent(path.join(project, ".pi", "agents", "claude-implementer.md"), `---
+name: claude-implementer
+description: Implements a bounded change in an interactive Claude Code pane
+runner:
+  type: tmux-pane
+  program: claude
+  model: opus
+  permissionMode: acceptEdits
+  layout: window
+  allowedTools: [Edit, Bash]
+async: true
+---
+Your final message of each turn is the deliverable.`);
+
+		const agent = discoverAgents(project, "project").agents.find((a) => a.name === "claude-implementer")!;
+		assert.deepEqual(agent.runner, {
+			type: "tmux-pane",
+			program: "claude",
+			model: "opus",
+			permissionMode: "acceptEdits",
+			allowedTools: ["Edit", "Bash"],
+			layout: "window",
+		});
+		assert.match(serializeAgent(agent), /runner:\n  type: tmux-pane/);
+		// Round-trips through discovery unchanged.
+		assert.deepEqual(discoverAgents(project, "project").agents.find((a) => a.name === "claude-implementer")?.runner, agent.runner);
+	}));
+
+	it("defaults tmux-pane optional fields rather than inventing values", () => withTempHome(() => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tmux-pane-minimal-"));
+		tempDirs.push(project);
+		writeAgent(path.join(project, ".pi", "agents", "minimal.md"), "---\nname: minimal\ndescription: Minimal\nrunner:\n  type: tmux-pane\n---\nBody");
+
+		const agent = discoverAgents(project, "project").agents.find((a) => a.name === "minimal")!;
+		assert.deepEqual(agent.runner, { type: "tmux-pane" });
+	}));
+
+	it("rejects invalid tmux-pane runner fields with a specific message", () => withTempHome(() => {
+		const invalidCases: [string, RegExp][] = [
+			["type: tmux-pane\n  program: codex", /program must be 'claude'/],
+			["type: tmux-pane\n  permissionMode: yolo", /permissionMode must be one of/],
+			["type: tmux-pane\n  layout: floating", /layout must be 'split' or 'window'/],
+			["type: tmux-pane\n  reuse: sometimes", /reuse must be a boolean/],
+			["type: tmux-pane\n  model: ''", /model must be a non-empty Claude model alias/],
+			["type: tmux-pane\n  size: ''", /size must be a non-empty string/],
+			["type: tmux-pane\n  allowedTools: nope", /allowedTools must be an array of non-empty strings/],
+			["type: tmux-pane\n  addDirs: [ok, 1]", /addDirs must be an array of non-empty strings/],
+			["type: tmux-pane\n  commnad: node", /unsupported fields: commnad/],
+		];
+		for (const [index, [runner, expected]] of invalidCases.entries()) {
+			const project = fs.mkdtempSync(path.join(os.tmpdir(), `pi-subagents-invalid-tmux-pane-${index}-`));
+			tempDirs.push(project);
+			writeAgent(path.join(project, ".pi", "agents", "pane.md"), `---\nname: pane\ndescription: Pane\nrunner:\n  ${runner}\n---\nBody`);
+			const discovered = discoverAgents(project, "project");
+			assert.equal(discovered.agents.some((agent) => agent.name === "pane"), false, `case ${index} should be rejected`);
+			assert.match(discovered.agentDiagnostics?.[0]?.error ?? "", expected);
+		}
+	}));
+
+	it("rejects Pi-only fields on a tmux-pane runner", () => withTempHome(() => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tmux-pane-pi-only-"));
+		tempDirs.push(project);
+		writeAgent(path.join(project, ".pi", "agents", "pane.md"), "---\nname: pane\ndescription: Pane\nrunner:\n  type: tmux-pane\nmodel: provider/model\nskills: reviewer\n---\nBody");
+		const error = discoverAgents(project, "project").agentDiagnostics?.[0]?.error ?? "";
+		assert.match(error, /runner\.type='tmux-pane'/);
+		assert.match(error, /unsupported Pi-only fields: model, skills/);
+	}));
+
 	it("rejects invalid and Pi-only external runner fields", () => withTempHome(() => {
 		const invalidCases = [
 			"type: unknown\n  command: node",

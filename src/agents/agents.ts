@@ -8,7 +8,8 @@ import { parse as parseYaml } from "yaml";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AcceptanceInput, AcceptanceRole, AgentRunnerConfig, OutputMode, ToolBudgetConfig, TurnBudgetConfig } from "../shared/types.ts";
+import { TMUX_PANE_PERMISSION_MODES } from "../shared/types.ts";
+import type { AcceptanceInput, AcceptanceRole, AgentRunnerConfig, OutputMode, TmuxPanePermissionMode, ToolBudgetConfig, TurnBudgetConfig } from "../shared/types.ts";
 import { getAgentDir, getProjectConfigDir } from "../shared/utils.ts";
 import { KNOWN_FIELDS } from "./agent-serializer.ts";
 import { parseChain, parseJsonChain } from "./chain-serializer.ts";
@@ -1527,8 +1528,11 @@ function parseAgentRunnerFrontmatter(raw: string | undefined, agentName: string)
 			...(runner.options ? { options: runner.options as Record<string, unknown> } : {}),
 		};
 	}
+	if (runner.type === "tmux-pane") {
+		return parseTmuxPaneRunnerFrontmatter(runner, agentName);
+	}
 	if (runner.type !== "external-cli") {
-		throw new Error(`Agent '${agentName}' has invalid runner.type; expected 'pi', 'external-cli', or 'external-job'.`);
+		throw new Error(`Agent '${agentName}' has invalid runner.type; expected 'pi', 'external-cli', 'external-job', or 'tmux-pane'.`);
 	}
 	if (typeof runner.command !== "string" || !runner.command.trim()) {
 		throw new Error(`Agent '${agentName}' external-cli runner requires a non-empty command string.`);
@@ -1551,8 +1555,87 @@ function parseAgentRunnerFrontmatter(raw: string | undefined, agentName: string)
 	};
 }
 
+function parseTmuxPaneStringArray(value: unknown, agentName: string, field: string): string[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || !entry.trim())) {
+		throw new Error(`Agent '${agentName}' tmux-pane runner ${field} must be an array of non-empty strings.`);
+	}
+	return value as string[];
+}
+
+/**
+ * Parse a `tmux-pane` runner block.
+ *
+ * Strict in the same way as the other runners: every field is validated and
+ * unknown keys are rejected with an explicit list, so a typo fails loudly
+ * instead of silently disabling an option the author believed was set.
+ */
+export function parseTmuxPaneRunnerFrontmatter(runner: Record<string, unknown>, agentName: string): AgentRunnerConfig {
+	if (runner.program !== undefined && runner.program !== "claude") {
+		throw new Error(`Agent '${agentName}' tmux-pane runner program must be 'claude'; no other program is supported.`);
+	}
+	if (runner.model !== undefined && (typeof runner.model !== "string" || !runner.model.trim())) {
+		throw new Error(`Agent '${agentName}' tmux-pane runner model must be a non-empty Claude model alias, e.g. 'opus'.`);
+	}
+	if (
+		runner.permissionMode !== undefined &&
+		(typeof runner.permissionMode !== "string" ||
+			!(TMUX_PANE_PERMISSION_MODES as readonly string[]).includes(runner.permissionMode))
+	) {
+		throw new Error(
+			`Agent '${agentName}' tmux-pane runner permissionMode must be one of: ${TMUX_PANE_PERMISSION_MODES.join(", ")}.`,
+		);
+	}
+	if (runner.layout !== undefined && runner.layout !== "split" && runner.layout !== "window") {
+		throw new Error(`Agent '${agentName}' tmux-pane runner layout must be 'split' or 'window'.`);
+	}
+	if (runner.size !== undefined && (typeof runner.size !== "string" || !runner.size.trim())) {
+		throw new Error(`Agent '${agentName}' tmux-pane runner size must be a non-empty string, e.g. '45%'.`);
+	}
+	if (runner.reuse !== undefined && typeof runner.reuse !== "boolean") {
+		throw new Error(`Agent '${agentName}' tmux-pane runner reuse must be a boolean.`);
+	}
+	const allowedTools = parseTmuxPaneStringArray(runner.allowedTools, agentName, "allowedTools");
+	const disallowedTools = parseTmuxPaneStringArray(runner.disallowedTools, agentName, "disallowedTools");
+	const addDirs = parseTmuxPaneStringArray(runner.addDirs, agentName, "addDirs");
+	const extraArgs = parseTmuxPaneStringArray(runner.extraArgs, agentName, "extraArgs");
+
+	const supported = new Set([
+		"type",
+		"program",
+		"model",
+		"permissionMode",
+		"allowedTools",
+		"disallowedTools",
+		"addDirs",
+		"layout",
+		"size",
+		"reuse",
+		"extraArgs",
+	]);
+	const unknown = Object.keys(runner).filter((key) => !supported.has(key));
+	if (unknown.length > 0) throw new Error(`Agent '${agentName}' tmux-pane runner has unsupported fields: ${unknown.join(", ")}.`);
+
+	return {
+		type: "tmux-pane",
+		...(runner.program ? { program: "claude" as const } : {}),
+		...(typeof runner.model === "string" ? { model: runner.model.trim() } : {}),
+		...(runner.permissionMode ? { permissionMode: runner.permissionMode as TmuxPanePermissionMode } : {}),
+		...(allowedTools?.length ? { allowedTools } : {}),
+		...(disallowedTools?.length ? { disallowedTools } : {}),
+		...(addDirs?.length ? { addDirs } : {}),
+		...(runner.layout ? { layout: runner.layout as "split" | "window" } : {}),
+		...(typeof runner.size === "string" ? { size: runner.size.trim() } : {}),
+		...(runner.reuse === true ? { reuse: true } : {}),
+		...(extraArgs?.length ? { extraArgs } : {}),
+	};
+}
+
 function validateExternalRunnerProfile(frontmatter: Record<string, string>, agentName: string, runner: AgentRunnerConfig | undefined): void {
-	if (runner?.type !== "external-cli" && runner?.type !== "external-job") return;
+	// tmux-pane is a non-Pi runner too: a Claude pane is not a Pi child, so
+	// Pi-only frontmatter (tools, skills, extensions, Pi model overrides) cannot
+	// be honoured and must fail closed rather than be silently ignored.
+	if (runner?.type !== "external-cli" && runner?.type !== "external-job" && runner?.type !== "tmux-pane") return;
 	const unsupported = ["tools", "model", "fallbackModels", "thinking", "extensions", "subagentOnlyExtensions", "maxSubagentDepth", "completionGuard", "skills", "skill", "skillPath", "toolBudget", "permission", "permissions"]
 		.filter((field) => frontmatter[field] !== undefined);
 	if (unsupported.length > 0) {
