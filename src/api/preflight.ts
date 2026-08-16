@@ -9,9 +9,11 @@ import { buildAgentMemoryInjection } from "../agents/agent-memory.ts";
 import { buildModelCandidates, resolveEffectiveSubagentModel, type AvailableModelInfo, type ParentModel } from "../runs/shared/model-fallback.ts";
 import { applyThinkingSuffix, resolvePiLaunchToolPlan, type PiLaunchToolPlan } from "../runs/shared/pi-args.ts";
 import { injectOutputPathSystemPrompt, normalizeSingleOutputOverride, resolveSingleOutputPath } from "../runs/shared/single-output.ts";
+import { isTmuxPaneSupportedPlatform, resolveExecutableOnPath } from "../runs/shared/tmux-pane/spawn.ts";
+import { Tmux } from "../runs/shared/tmux-pane/tmux.ts";
 import { getArtifactPaths, getArtifactsDir } from "../shared/artifacts.ts";
 import { resolveEffectiveThinking } from "../shared/model-info.ts";
-import { SUBAGENT_LIFECYCLE_ARTIFACT_VERSION, type ArtifactDirPreference, type ArtifactPaths, type JsonSchemaObject, type OutputMode } from "../shared/types.ts";
+import { SUBAGENT_LIFECYCLE_ARTIFACT_VERSION, type ArtifactDirPreference, type ArtifactPaths, type JsonSchemaObject, type OutputMode, isNonPiRunnerType,} from "../shared/types.ts";
 import { capabilityCeilingAgentRestrictionMessage, intersectSubagentCapabilityCeilings, type ResolvedSubagentCapabilityCeiling, type SubagentCapabilityAudit } from "../runs/shared/capability-ceiling.ts";
 import { appendTurnBudgetSystemPrompt } from "../runs/shared/turn-budget.ts";
 import type { ResolvedTurnBudget } from "../shared/types.ts";
@@ -35,7 +37,8 @@ export type SubagentLaunchContractReasonCode =
 	| "invalid_artifact_dir"
 	| "invalid_cwd"
 	| "unsupported_mode"
-	| "restricted_agent";
+	| "restricted_agent"
+	| "runner_unavailable";
 
 export interface SubagentLaunchContractDiagnostic {
 	code: SubagentLaunchContractReasonCode | "host_required" | "snapshot_warning";
@@ -221,6 +224,50 @@ function candidateList(inputAgent: string, selected: AgentConfig | undefined, cw
 		}));
 }
 
+/**
+ * Report whether a tmux-pane launch could succeed here.
+ *
+ * Strictly side-effect free, as preflight is documented to be: it probes for
+ * tmux, claude, and a reachable tmux server, but never creates a session or a
+ * pane. Creating the fallback session is the launch path's job.
+ */
+async function probeTmuxPaneAvailability(agentName: string): Promise<SubagentLaunchContractDiagnostic[]> {
+	const diagnostics: SubagentLaunchContractDiagnostic[] = [];
+	if (!isTmuxPaneSupportedPlatform()) {
+		diagnostics.push({
+			code: "runner_unavailable",
+			severity: "error",
+			message: `Agent '${agentName}' uses runner.type='tmux-pane', which requires tmux and is unavailable on Windows.`,
+		});
+		return diagnostics;
+	}
+
+	const tmux = new Tmux();
+	if ((await tmux.version()) === null) {
+		diagnostics.push({
+			code: "runner_unavailable",
+			severity: "error",
+			message: `Agent '${agentName}' uses runner.type='tmux-pane' but tmux was not found on PATH.`,
+		});
+	} else if (!(await tmux.serverReachable()) && !process.env.TMUX) {
+		// Not an error: the launch path starts a detached session when needed.
+		diagnostics.push({
+			code: "runner_unavailable",
+			severity: "warning",
+			message: `No tmux server is currently running; agent '${agentName}' will be hosted in a new detached tmux session.`,
+		});
+	}
+
+	if (resolveExecutableOnPath("claude") === undefined) {
+		diagnostics.push({
+			code: "runner_unavailable",
+			severity: "error",
+			message: `Agent '${agentName}' uses runner.type='tmux-pane' but the 'claude' CLI was not found on PATH.`,
+		});
+	}
+	return diagnostics;
+}
+
 export async function resolveSubagentLaunchContract(input: SubagentLaunchContractInput): Promise<SubagentLaunchContractResult> {
 	const diagnostics: SubagentLaunchContractDiagnostic[] = [];
 	const effectiveCwd = path.resolve(input.cwd);
@@ -285,7 +332,11 @@ export async function resolveSubagentLaunchContract(input: SubagentLaunchContrac
 	}
 	if (resolvedSkills.missing.length > 0) diagnostics.push({ code: "missing_skill", severity: "error", message: `Missing skills: ${resolvedSkills.missing.join(", ")}` });
 
-	const externalRunner = agent.runner?.type === "external-cli" || agent.runner?.type === "external-job";
+	if (agent.runner?.type === "tmux-pane") {
+		for (const diagnostic of await probeTmuxPaneAvailability(agent.name)) diagnostics.push(diagnostic);
+	}
+
+	const externalRunner = isNonPiRunnerType(agent.runner?.type);
 	const availableModels = normalizeAvailableModels(input.availableModels);
 	const preferredProvider = input.preferredProvider ?? input.parentModel?.provider;
 	const primaryModel = externalRunner

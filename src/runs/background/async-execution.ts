@@ -28,6 +28,7 @@ import { resolveToolTimeoutMs, toolTimeoutFromEnv } from "../shared/tool-timeout
 import type { ModelScopeConfig } from "../shared/model-scope.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { resolveExpectedWorktreeAgentCwd } from "../shared/worktree.ts";
+import { assertReuseAllowed } from "../shared/tmux-pane/pane-identity.ts";
 import { buildWorkflowGraphSnapshot } from "../shared/workflow-graph.ts";
 import { ChainOutputValidationError, validateChainOutputBindings } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime } from "../shared/structured-output.ts";
@@ -68,7 +69,7 @@ import type { SessionLeaseRequest } from "../shared/session-lease.ts";
 import { finalizeProcessTerminal, readProcessTerminal } from "./process-terminal.ts";
 import type { ActiveAsyncCapacityHandle } from "./active-async-capacity.ts";
 import { SUBAGENT_PROCESS_TERMINAL_EVENT } from "../../shared/types.ts";
-import { assertAgentAllowedByCapabilityCeiling, decodeSubagentCapabilityCeiling, intersectSubagentCapabilityCeilings, resolveCurrentSubagentCapabilityCeiling, SUBAGENT_CAPABILITY_CEILING_ENV, type ResolvedSubagentCapabilityCeiling } from "../shared/capability-ceiling.ts";
+import { assertAgentAllowedByCapabilityCeiling, capabilityCeilingUnenforceableRunnerMessage, decodeSubagentCapabilityCeiling, intersectSubagentCapabilityCeilings, resolveCurrentSubagentCapabilityCeiling, SUBAGENT_CAPABILITY_CEILING_ENV, type ResolvedSubagentCapabilityCeiling } from "../shared/capability-ceiling.ts";
 import { agentDefinitionDigest, launchBindingDigest } from "../../shared/launch-contract.ts";
 import { resolvePermissionRules, type PermissionConfig } from "../shared/permissions.ts";
 
@@ -713,7 +714,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 	};
 	const buildSeqStep = (s: SequentialStep, sessionFile?: string, behaviorCwd?: string, progressPrecreated = false, resolvedBehavior?: ResolvedStepBehavior, flatIndex?: number, parallelOutputNamespace?: { stepIndex: number; taskIndex?: number }, runFanoutPath?: string) => {
 		const a = agents.find((x) => x.name === s.agent)!;
-		const externalRunner = a.runner?.type === "external-cli" || a.runner?.type === "external-job";
+		const externalRunner = a.runner?.type === "external-cli" || a.runner?.type === "external-job" || a.runner?.type === "tmux-pane";
 		const externalRunnerType = a.runner?.type;
 		if (externalRunner) {
 			const unsupported: string[] = [];
@@ -722,13 +723,29 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			if (s.acceptance !== undefined || params.agentContract !== undefined || s.agentContract !== undefined) unsupported.push("acceptance/agent contract");
 			if (s.toolBudget !== undefined || params.toolBudget !== undefined || a.toolBudget !== undefined || params.configToolBudget !== undefined) unsupported.push("tool budget");
 			if (params.contextForAgent?.(s.agent) === "fork") unsupported.push("fork context");
+			// Turn and usage budgets are run-level and are not visible here; they
+			// are rejected for tmux-pane where the run's params are in scope.
 			if (unsupported.length > 0) throw new AsyncStartValidationError(`Agent '${a.name}' uses runner.type='${externalRunnerType}' and does not support: ${unsupported.join(", ")}.`);
 		}
+		if (a.runner?.type === "tmux-pane" && a.runner.reuse === true) {
+			try {
+				assertReuseAllowed({
+					agent: a.name,
+					parallel: parallelOutputNamespace?.taskIndex !== undefined,
+					worktree: s.worktree === true,
+				});
+			} catch (error) {
+				throw new AsyncStartValidationError(error instanceof Error ? error.message : String(error));
+			}
+		}
+		const stepCeiling = intersectSubagentCapabilityCeilings(params.capabilityCeiling, decodeSubagentCapabilityCeiling(process.env[SUBAGENT_CAPABILITY_CEILING_ENV]));
 		try {
-			assertAgentAllowedByCapabilityCeiling(a.name, intersectSubagentCapabilityCeilings(params.capabilityCeiling, decodeSubagentCapabilityCeiling(process.env[SUBAGENT_CAPABILITY_CEILING_ENV])));
+			assertAgentAllowedByCapabilityCeiling(a.name, stepCeiling);
 		} catch (error) {
 			throw new AsyncStartValidationError(error instanceof Error ? error.message : String(error));
 		}
+		const unenforceableCeiling = capabilityCeilingUnenforceableRunnerMessage(a.name, externalRunnerType, stepCeiling);
+		if (unenforceableCeiling) throw new AsyncStartValidationError(unenforceableCeiling);
 		const toolBudgetInput = s.toolBudget ?? params.toolBudget ?? a.toolBudget ?? params.configToolBudget;
 		const resolvedToolBudget = validateToolBudgetConfig(toolBudgetInput, s.toolBudget ? "toolBudget" : a.toolBudget ? "agent.toolBudget" : "config.toolBudget");
 		if (resolvedToolBudget.error) throw new AsyncStartValidationError(resolvedToolBudget.error);
@@ -1327,7 +1344,7 @@ export function executeAsyncSingle(
 	const task = params.task ?? "";
 	const acceptanceErrors = validateAcceptanceInput(params.acceptance);
 	if (acceptanceErrors.length > 0) return formatAsyncStartError("single", acceptanceErrors.join(" "));
-	const externalRunner = agentConfig.runner?.type === "external-cli" || agentConfig.runner?.type === "external-job";
+	const externalRunner = agentConfig.runner?.type === "external-cli" || agentConfig.runner?.type === "external-job" || agentConfig.runner?.type === "tmux-pane";
 	const externalRunnerType = agentConfig.runner?.type;
 	const permissionRules = resolvePermissionRules(ctx.permissions, agentConfig.permissions);
 	if (externalRunner) {
@@ -1340,6 +1357,13 @@ export function executeAsyncSingle(
 		if (params.context === "fork") unsupported.push("fork context");
 		if ((params.skills?.length ?? 0) > 0) unsupported.push("skills");
 		if (permissionRules) unsupported.push("native Pi child permissions");
+		// A pane is a foreign agent loop: there is no interception point for
+		// turns, and hook payloads carry no usage. A budget that cannot be
+		// measured must never appear to be enforced.
+		if (agentConfig.runner?.type === "tmux-pane") {
+			if (params.turnBudget !== undefined) unsupported.push("turn budget");
+			if (params.usageBudget !== undefined) unsupported.push("usage budget");
+		}
 		if (unsupported.length > 0) return formatAsyncStartError("single", `Agent '${agentConfig.name}' uses runner.type='${externalRunnerType}' and does not support: ${unsupported.join(", ")}.`);
 	}
 	const capabilityCeiling = intersectSubagentCapabilityCeilings(params.capabilityCeiling ?? resolveCurrentSubagentCapabilityCeiling(ctx.currentSessionId), decodeSubagentCapabilityCeiling(process.env[SUBAGENT_CAPABILITY_CEILING_ENV]));
@@ -1348,6 +1372,8 @@ export function executeAsyncSingle(
 	} catch (error) {
 		return formatAsyncStartError("single", error instanceof Error ? error.message : String(error));
 	}
+	const unenforceableCeiling = capabilityCeilingUnenforceableRunnerMessage(agentConfig.name, externalRunnerType, capabilityCeiling);
+	if (unenforceableCeiling) return formatAsyncStartError("single", unenforceableCeiling);
 	const runnerCwd = resolveChildCwd(ctx.cwd, cwd);
 	const instructionCwd = params.worktree === true
 		? resolveExpectedWorktreeAgentCwd(runnerCwd, `${id}-s0`, 0, worktreeBaseDir)

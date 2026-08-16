@@ -52,6 +52,13 @@ function retainedSessionFile(sessionFile: string | undefined): RetainedChildResu
 function childResumability(run: AsyncRunSummary, step: AsyncRunSummary["steps"][number]): RetainedChildResumability {
 	if (run.state === "stopped" || step.status === "stopped") return { state: "not-resumable", reason: "stopped run" };
 	if (step.runner?.type === "external-cli" || step.runner?.type === "external-job") return { state: "not-resumable", reason: "external runner" };
+	// A live tmux-pane child IS resumable through its pane, but retained resume
+	// replays a persisted Pi session, and a Claude pane never had one. Say that
+	// precisely rather than reporting it as a generic external runner, so the
+	// reason does not contradict the runner's advertised resume capability.
+	if (step.runner?.type === "tmux-pane") {
+		return { state: "not-resumable", reason: "tmux-pane runner: the pane hosts a Claude session, not a retained Pi session" };
+	}
 	const session = retainedSessionFile(step.sessionFile ?? run.sessionFile);
 	if (session.state === "not-resumable") return session;
 	let recoveryDescriptor: ReturnType<typeof readAsyncRecoveryDescriptor>;

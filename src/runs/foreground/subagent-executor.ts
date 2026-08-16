@@ -167,8 +167,7 @@ import {
 	resolveChildMaxSubagentDepth,
 	resolveCurrentMaxSubagentDepth,
 	resolveMaxSubagentSpawnsPerRun,
-	wrapForkTask,
-} from "../../shared/types.ts";
+	wrapForkTask, isNonPiRunnerType,} from "../../shared/types.ts";
 
 const MUTATING_MANAGEMENT_ACTIONS = new Set(["create", "update", "delete", "eject", "disable", "enable", "reset", "grant-spawn-budget", "watchdog.configure", "mission.create", "mission.update", "mission.resolve-decision", "mission.attach-run", "mission.close", "inspector.open", "inspector.close", "project.open", "project.close", "worktree.discard", "refine", "refine.rollback", "dismiss", "schedule.create", "schedule.pause", "schedule.resume", "schedule.run", "schedule.run-due", "schedule.delete"]);
 const DESTRUCTIVE_MANAGEMENT_ACTIONS = new Set(["delete", "eject", "disable", "reset", "mission.close", "worktree.discard", "refine.rollback", "inspector.close", "project.close", "stop", "interrupt", "schedule.delete"]);
@@ -993,6 +992,9 @@ function interruptAsyncRun(
 		};
 	}
 	const activeSteps = status.steps?.filter((step) => step.status === "running") ?? [];
+	// tmux-pane is deliberately not in this list: Escape ends the turn while the
+	// pane and its conversation survive, which is exactly the pause that
+	// interrupt describes. Only runners with no such seam are rejected here.
 	if (activeSteps.length > 0 && activeSteps.every((step) => step.runner?.type === "external-cli" || step.runner?.type === "external-job")) {
 		return {
 			content: [{ type: "text", text: `Interrupt is unsupported for external async run ${target.asyncId}; use stop instead.` }],
@@ -1405,6 +1407,13 @@ async function steerNestedRun(input: { target: ResolvedSubagentRunId & { kind: "
 	return { content: [{ type: "text", text: `Nested run ${run.id} is not a live async Pi child session with a steering inbox. action='steer' cannot target foreground nested runs.` }], isError: true, details: { mode: "management", results: [] } };
 }
 
+/**
+ * Reject steer and resume for runners that genuinely cannot support them.
+ *
+ * tmux-pane is excluded: the runner relays steer messages into the pane and
+ * acknowledges only on a real UserPromptSubmit, and the pane keeps its Claude
+ * session so resume is a paste into the live conversation.
+ */
 function externalRunnerControlError(asyncDir: string, action: "steer" | "resume"): AgentToolResult<Details> | undefined {
 	const status = readStatus(asyncDir);
 	if (!status?.steps?.length || !status.steps.every((step) => step.runner?.type === "external-cli" || step.runner?.type === "external-job")) return undefined;
@@ -2528,7 +2537,7 @@ function resolveStaticLaunchSummary(input: {
 	thinkingOverrideForTask: ForkThinkingOverrideForTask;
 }): StaticLaunchSummary {
 	const agentConfig = input.agents.find((agent) => agent.name === input.agent);
-	const externalRunner = agentConfig?.runner?.type === "external-cli" || agentConfig?.runner?.type === "external-job";
+	const externalRunner = isNonPiRunnerType(agentConfig?.runner?.type);
 	const model = externalRunner
 		? undefined
 		: resolveEffectiveSubagentModel(
@@ -2764,10 +2773,10 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		const normalizedSkills = normalizeSkillInput(params.skill);
 		const skills = normalizedSkills === false ? [] : normalizedSkills;
 		const maxSubagentDepth = resolveChildMaxSubagentDepth(currentMaxSubagentDepth, a.maxSubagentDepth);
-		const externalRunnerWithoutExplicitModel = (a.runner?.type === "external-cli" || a.runner?.type === "external-job")
+		const externalRunnerWithoutExplicitModel = isNonPiRunnerType(a.runner?.type)
 			&& params.model === undefined
 			&& (a.model === undefined || (a.modelSource?.type === "subagents.defaultModel" && a.model === a.modelSource.model));
-		const modelOverride = a.runner?.type === "external-cli" || a.runner?.type === "external-job"
+		const modelOverride = isNonPiRunnerType(a.runner?.type)
 			? params.model ?? (externalRunnerWithoutExplicitModel ? undefined : a.model)
 			: resolveEffectiveSubagentModel(params.model as string | undefined, a.model, parentModel, availableModels, currentProvider, data.modelScope === undefined ? {} : { scope: data.modelScope });
 		return executeAsyncSingle(id, compactOptional<Parameters<typeof executeAsyncSingle>[1]>({
@@ -4968,7 +4977,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			const parentModel = requestParentModel;
 			prepareForkThinking = (agentName, index, modelOverride) => {
 				const agentConfig = agents.find((agent) => agent.name === agentName);
-				if (agentConfig?.runner?.type === "external-cli" || agentConfig?.runner?.type === "external-job") {
+				if (isNonPiRunnerType(agentConfig?.runner?.type)) {
 					forkThinkingRequirements.set(index, true);
 					return;
 				}
@@ -5009,7 +5018,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				: (effectiveParams.chain ?? []).flatMap((step) => getStepAgents(step as ChainStep));
 		const externalAgent = selectedAgentNames
 			.map((name) => agents.find((agent) => agent.name === name))
-			.find((agent) => agent?.runner?.type === "external-cli" || agent?.runner?.type === "external-job");
+			.find((agent) => isNonPiRunnerType(agent?.runner?.type));
 		if (externalAgent && (!effectiveAsync || effectiveParams.foregroundOnly === true)) {
 			return buildRequestedModeError(effectiveParams, `Agent '${externalAgent.name}' uses runner.type='${externalAgent.runner?.type}', which currently supports async/background execution only. Omit async or pass async:true; clarify and foregroundOnly are unsupported.`);
 		}

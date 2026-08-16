@@ -474,6 +474,63 @@ describe("tmux-pane turn state machine", () => {
 		}
 	});
 
+	it("treats a steer's UserPromptSubmit as delivery, not as superseding the turn", async () => {
+		const dir = createTempDir();
+		const tmux = new FakeTmux();
+		const stateDir = path.join(dir, "state");
+		const pane = makePane(stateDir, tmux);
+		const stopDriver = startTailDriver(pane);
+		try {
+			const turn = await pane.send("task");
+			appendLocalEvent(stateDir, { hook_event_name: "UserPromptSubmit", prompt_id: "p1" });
+			await delay(60);
+
+			const acked: string[] = [];
+			pane.onSteerDelivered((requestId) => acked.push(requestId));
+			await pane.steer("req-1", "also update the changelog");
+			appendLocalEvent(stateDir, { hook_event_name: "UserPromptSubmit", prompt_id: "p2" });
+			await delay(80);
+
+			assert.deepEqual(acked, ["req-1"], "the steer must be acknowledged on a real UserPromptSubmit");
+			assert.equal(turn.status, "running", "a delivered steer must not supersede its own turn");
+			assert.ok(tmux.pasted.includes("also update the changelog"));
+
+			// The original turn still completes normally afterwards.
+			appendLocalEvent(stateDir, { hook_event_name: "Stop", prompt_id: "p1", last_assistant_message: "done" });
+			const finished = await pane.awaitTurn(turn, { timeoutMs: 3_000, submitTimeoutMs: 2_000, tickMs: 25 });
+			assert.equal(finished.status, "completed");
+			assert.equal(finished.text, "done");
+		} finally {
+			stopDriver();
+			pane.detach();
+			removeTempDir(dir);
+		}
+	});
+
+	it("still supersedes when an unexpected prompt arrives with no steer pending", async () => {
+		const dir = createTempDir();
+		const tmux = new FakeTmux();
+		const stateDir = path.join(dir, "state");
+		const pane = makePane(stateDir, tmux);
+		const stopDriver = startTailDriver(pane);
+		try {
+			const turn = await pane.send("task");
+			appendLocalEvent(stateDir, { hook_event_name: "UserPromptSubmit", prompt_id: "p1" });
+			await delay(60);
+			// One steer pasted, but TWO foreign prompts arrive: the second is a human.
+			await pane.steer("req-1", "steer message");
+			appendLocalEvent(stateDir, { hook_event_name: "UserPromptSubmit", prompt_id: "p2" });
+			appendLocalEvent(stateDir, { hook_event_name: "UserPromptSubmit", prompt_id: "p3" });
+
+			const finished = await pane.awaitTurn(turn, { timeoutMs: 3_000, submitTimeoutMs: 2_000, tickMs: 25 });
+			assert.equal(finished.status, "superseded");
+		} finally {
+			stopDriver();
+			pane.detach();
+			removeTempDir(dir);
+		}
+	});
+
 	it("subtracts banked blocked time from effective elapsed", () => {
 		const dir = createTempDir();
 		const tmux = new FakeTmux();

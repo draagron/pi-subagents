@@ -20,6 +20,7 @@ import {
 	type ExternalJobRunnerStatus,
 	type ExternalJobStatus,
 	type ExternalProcessStatus,
+	type SubagentRunnerStatus,
 	type ArtifactPaths,
 	type AsyncParallelGroupStatus,
 	type AsyncStatus,
@@ -138,6 +139,9 @@ import { createBoundedByteTail, createBoundedLineReader, formatProtocolOutputLim
 import { acquireSessionLease, type SessionLeaseRequest } from "../shared/session-lease.ts";
 import { buildExternalCliPrompt, runExternalCli } from "../shared/external-cli-runner.ts";
 import { runExternalJob } from "../shared/external-job-runner.ts";
+import { runTmuxPane } from "../shared/tmux-pane/runner.ts";
+import { resolveExecutableOnPath } from "../shared/tmux-pane/spawn.ts";
+import { resolveNodeExecutable } from "../../shared/node-executable.ts";
 import { createOrcaProgressTab, type OrcaProgressTab } from "../shared/orca-progress-tabs.ts";
 import { decodeSubagentCapabilityCeiling, SUBAGENT_CAPABILITY_CEILING_ENV, type ResolvedSubagentCapabilityCeiling } from "../shared/capability-ceiling.ts";
 import {
@@ -252,7 +256,7 @@ interface StepResult {
 	watchdog?: import("../../shared/types.ts").ChildWatchdogProgress;
 	writerProcesses?: PiWriterProcessInstanceExitV1[];
 	writerAttemptCount?: number;
-	runner?: ExternalCliRunnerStatus | ExternalJobRunnerStatus;
+	runner?: SubagentRunnerStatus;
 	externalProcess?: ExternalProcessStatus;
 	externalJob?: ExternalJobStatus;
 }
@@ -1362,6 +1366,74 @@ async function runSingleStepInner(
 			metadataSaveError: artifactErrors.metadataSaveError,
 			runner,
 			externalProcess: external.externalProcess,
+		});
+	}
+
+	if (step.runner?.type === "tmux-pane") {
+		const paneConfig = step.runner;
+		const outputSnapshot = captureSingleOutputSnapshot(step.outputPath);
+		const paneRun = await runTmuxPane(omitUndefinedProperties({
+			identity: { runId: ctx.id, stepIndex: ctx.flatIndex, childIndex: ctx.flatIndex, agent: step.agent },
+			// Worktree isolation arrives here already resolved: the parallel path
+			// rewrites step.cwd before runner dispatch, so the pane simply opens there.
+			cwd: step.cwd ?? ctx.cwd,
+			asyncDir: path.dirname(ctx.outputFile),
+			stepIndex: ctx.flatIndex,
+			prompt: buildExternalCliPrompt(step.systemPrompt ?? "", task),
+			claudeBin: resolveExecutableOnPath("claude") ?? "claude",
+			nodeBin: resolveNodeExecutable(),
+			model: paneConfig.model,
+			permissionMode: paneConfig.permissionMode,
+			allowedTools: paneConfig.allowedTools,
+			disallowedTools: paneConfig.disallowedTools,
+			addDirs: paneConfig.addDirs,
+			layout: paneConfig.layout,
+			size: paneConfig.size,
+			reuse: paneConfig.reuse,
+			extraArgs: paneConfig.extraArgs,
+			registerTimeout: ctx.registerTimeout,
+			registerStop: ctx.registerStop,
+			timeoutMessage: ctx.timeoutMessage,
+			stopMessage: ctx.stopMessage,
+			onToolEvent: (toolName: string) => ctx.orcaProgressTab?.append(`[tool] ${toolName}\n`),
+			onNeedsAttention: (message: string) => ctx.orcaProgressTab?.append(`[blocked] ${message}\n`),
+		}));
+		const runner = paneRun.runner;
+		try { fs.writeFileSync(ctx.outputFile, paneRun.output, "utf-8"); } catch { /* Observability output is best-effort. */ }
+		const resolvedOutput = step.outputPath && paneRun.exitCode === 0
+			? resolveSingleOutput(step.outputPath, paneRun.output, outputSnapshot)
+			: { fullOutput: paneRun.output };
+		const outputReference = resolvedOutput.savedPath ? formatSavedOutputReference(resolvedOutput.savedPath, resolvedOutput.fullOutput) : undefined;
+		const finalizedOutput = finalizeSingleOutput(omitUndefinedProperties({
+			fullOutput: resolvedOutput.fullOutput,
+			outputPath: step.outputPath,
+			outputMode: step.outputMode,
+			exitCode: paneRun.exitCode ?? 1,
+			savedPath: resolvedOutput.savedPath,
+			outputReference,
+			saveError: resolvedOutput.saveError,
+		}));
+		const artifactErrors = artifactPaths && ctx.artifactConfig?.enabled !== false
+			? persistStepArtifacts({
+				artifactPaths,
+				artifactConfig: ctx.artifactConfig,
+				output: formatOutputArtifactContent(omitUndefinedProperties({ output: resolvedOutput.fullOutput, error: paneRun.error, metadataPath: ctx.artifactConfig?.includeMetadata === false ? undefined : artifactPaths.metadataPath })),
+				metadata: { runId: ctx.id, agent: step.agent, task: PROMPT_REDACTED, runner, turnStatus: paneRun.turnStatus, exitCode: paneRun.exitCode, error: paneRun.error, timestamp: Date.now() },
+			})
+			: {};
+		return omitUndefinedProperties({
+			agent: step.agent,
+			context: step.context,
+			output: finalizedOutput.displayOutput,
+			outputState: paneRun.output.trim() ? "present" : "absent",
+			exitCode: paneRun.exitCode,
+			error: paneRun.error,
+			timedOut: paneRun.timedOut,
+			stopped: paneRun.stopped,
+			artifactPaths,
+			outputSaveError: artifactErrors.outputSaveError,
+			metadataSaveError: artifactErrors.metadataSaveError,
+			runner,
 		});
 	}
 

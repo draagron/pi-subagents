@@ -1315,6 +1315,22 @@ export type AgentRunnerConfig =
 		extraArgs?: string[];
 	};
 
+/**
+ * Whether a runner hosts something other than a Pi child.
+ *
+ * These runners bypass Pi model resolution (their model field, if any, names a
+ * model in the child application's own vocabulary), Pi tool construction, and
+ * Pi session persistence.
+ *
+ * This answers "is this a Pi child?" and nothing else. It is deliberately NOT a
+ * proxy for which control operations a runner supports: a tmux pane supports
+ * steer, resume, and interrupt, while external-cli supports none of them. Call
+ * sites gating on control capability must keep narrowing on the specific type.
+ */
+export function isNonPiRunnerType(type: AgentRunnerConfig["type"] | undefined): boolean {
+	return type === "external-cli" || type === "external-job" || type === "tmux-pane";
+}
+
 export const TMUX_PANE_PERMISSION_MODES = [
 	"acceptEdits",
 	"auto",

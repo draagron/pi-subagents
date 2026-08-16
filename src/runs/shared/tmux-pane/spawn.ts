@@ -80,6 +80,31 @@ export function isTmuxPaneSupportedPlatform(platform: NodeJS.Platform = process.
 	return platform !== "win32";
 }
 
+function isExecutableFile(candidate: string): boolean {
+	try {
+		if (!fs.statSync(candidate).isFile()) return false;
+		if (process.platform === "win32") return true;
+		fs.accessSync(candidate, fs.constants.X_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Find an executable on PATH without spawning anything.
+ *
+ * A probe must not run the program it is probing for, and must not involve a
+ * shell; scanning PATH keeps preflight genuinely side-effect free.
+ */
+export function resolveExecutableOnPath(command: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+	for (const directory of (env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
+		const candidate = path.join(directory, command);
+		if (isExecutableFile(candidate)) return candidate;
+	}
+	return undefined;
+}
+
 export function paneStateDir(stateRoot: string, paneName: string): string {
 	return path.join(stateRoot, TMUX_PANE_STATE_DIRNAME, paneName);
 }

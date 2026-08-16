@@ -116,6 +116,13 @@ export class ClaudePane {
 	private turnCounter = 0;
 	/** Start of the current blocked span, if any. */
 	private blockedSince: number | undefined;
+	/**
+	 * Steer request ids pasted into the pane but not yet confirmed by a
+	 * UserPromptSubmit. Distinguishes a runner-delivered steer from a human
+	 * typing into the pane, which must supersede the turn instead.
+	 */
+	private readonly pendingSteerIds: string[] = [];
+	private readonly steerListeners = new Set<(requestId: string, promptId?: string) => void>();
 
 	readonly meta: PaneMeta;
 	private readonly tmux: Tmux;
@@ -183,8 +190,21 @@ export class ClaudePane {
 				if (!turn.promptId) {
 					turn.promptId = event.prompt_id;
 				} else if (event.prompt_id && event.prompt_id !== turn.promptId) {
-					// Another prompt was submitted into this pane before our turn
-					// produced a Stop. Ours will never complete.
+					// A second prompt landed before our turn produced a Stop. If the
+					// runner pasted it as a steer, this event IS the delivery receipt
+					// and the turn continues. Otherwise a human typed into the pane
+					// and our turn will never complete.
+					const steerRequestId = this.pendingSteerIds.shift();
+					if (steerRequestId !== undefined) {
+						for (const listener of [...this.steerListeners]) {
+							try {
+								listener(steerRequestId, event.prompt_id);
+							} catch {
+								// A failing ack listener must not supersede a live turn.
+							}
+						}
+						return;
+					}
 					this.finish(turn, "superseded", { note: "another prompt was submitted in the pane" });
 				}
 				return;
@@ -282,19 +302,7 @@ export class ClaudePane {
 		this.current = turn;
 
 		try {
-			if (!(await this.tmux.paneExists(this.paneId))) {
-				throw new Error(`Pane ${this.paneId} for agent "${this.agent}" is gone.`);
-			}
-
-			const tasksDir = path.join(this.meta.stateDir, "tasks");
-			fs.mkdirSync(tasksDir, { recursive: true });
-			const file = path.join(tasksDir, `${turn.id}.md`);
-			fs.writeFileSync(file, prompt);
-
-			await this.tmux.pasteFile(this.paneId, `pi-${this.meta.paneName}`, file);
-			// Give the editor a beat to absorb the bracketed paste before submitting.
-			if (this.pasteSettleMs > 0) await delay(this.pasteSettleMs);
-			await this.tmux.sendKey(this.paneId, "Enter");
+			await this.deliver(turn.id, prompt);
 			// The deadline starts when the task is actually submitted, not when the
 			// paste began: the settle delay is the runner's cost, not the child's.
 			turn.sentAt = Date.now();
@@ -303,6 +311,53 @@ export class ClaudePane {
 			throw error;
 		}
 		return turn;
+	}
+
+	/**
+	 * Write text to a file and deliver it by bracketed paste, then Enter.
+	 *
+	 * The text never reaches a shell or a tmux argument, so no quoting or
+	 * escaping path exists for it.
+	 */
+	private async deliver(id: string, text: string): Promise<void> {
+		if (!(await this.tmux.paneExists(this.paneId))) {
+			throw new Error(`Pane ${this.paneId} for agent "${this.agent}" is gone.`);
+		}
+
+		const tasksDir = path.join(this.meta.stateDir, "tasks");
+		fs.mkdirSync(tasksDir, { recursive: true });
+		const file = path.join(tasksDir, `${id}.md`);
+		fs.writeFileSync(file, text);
+
+		await this.tmux.pasteFile(this.paneId, `pi-${this.meta.paneName}`, file);
+		// Give the editor a beat to absorb the bracketed paste before submitting.
+		if (this.pasteSettleMs > 0) await delay(this.pasteSettleMs);
+		await this.tmux.sendKey(this.paneId, "Enter");
+	}
+
+	/** Notified when a pasted steer is confirmed by a real UserPromptSubmit. */
+	onSteerDelivered(listener: (requestId: string, promptId?: string) => void): () => void {
+		this.steerListeners.add(listener);
+		return () => this.steerListeners.delete(listener);
+	}
+
+	/**
+	 * Paste a steer message into a pane that is mid-turn.
+	 *
+	 * Registered as pending first, so the UserPromptSubmit it produces is read
+	 * as a delivery receipt rather than as a human superseding the turn. The
+	 * caller acknowledges only on that event - delivery confirmed by the target
+	 * application, not by a timing heuristic.
+	 */
+	async steer(requestId: string, message: string): Promise<void> {
+		this.pendingSteerIds.push(requestId);
+		try {
+			await this.deliver(`steer-${requestId}`, message);
+		} catch (error) {
+			const index = this.pendingSteerIds.indexOf(requestId);
+			if (index >= 0) this.pendingSteerIds.splice(index, 1);
+			throw error;
+		}
 	}
 
 	/**

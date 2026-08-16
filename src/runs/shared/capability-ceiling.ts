@@ -189,6 +189,36 @@ export function capabilityCeilingAgentRestrictionSources(ceiling: ResolvedSubage
 	return ceiling?.allowedAgents === undefined ? undefined : [...ceiling.sources];
 }
 
+/**
+ * Runner types whose tool use Pi cannot constrain.
+ *
+ * Pi enforces a capability ceiling by constructing the child's tool set, which
+ * is only possible for a Pi child. A foreign interactive agent - a Claude Code
+ * session in a tmux pane - selects its own tools from its own configuration.
+ * Its `--allowedTools` is enforced by Claude, not by Pi, so it is advisory here.
+ */
+const CEILING_UNENFORCEABLE_RUNNERS = new Set(["tmux-pane"]);
+
+/**
+ * Refuse a launch when a ceiling is active but cannot be enforced on the runner.
+ *
+ * Failing closed is the point: permitting the launch would present an
+ * unenforceable ceiling as an enforced one, which is worse than having no
+ * ceiling at all, because callers would act on a guarantee that does not hold.
+ */
+export function capabilityCeilingUnenforceableRunnerMessage(
+	agentName: string,
+	runnerType: string | undefined,
+	ceiling: ResolvedSubagentCapabilityCeiling | undefined,
+): string | undefined {
+	if (!ceiling || runnerType === undefined || !CEILING_UNENFORCEABLE_RUNNERS.has(runnerType)) return undefined;
+	const sources = ceiling.sources.length ? ceiling.sources.join(", ") : "unknown source";
+	return (
+		`Agent '${agentName}' uses runner.type='${runnerType}', which Pi cannot hold to the capability ceiling from ${sources}. ` +
+		`Tool restrictions on this runner are enforced by the child application, not by Pi, so the launch is refused rather than run under an unenforced ceiling.`
+	);
+}
+
 export function encodeSubagentCapabilityCeiling(ceiling: ResolvedSubagentCapabilityCeiling | undefined): string | undefined {
 	if (!ceiling) return undefined;
 	return Buffer.from(JSON.stringify(ceiling), "utf8").toString("base64url");
