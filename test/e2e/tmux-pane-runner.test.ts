@@ -410,6 +410,44 @@ describe("tmux-pane runner e2e", { skip: skipReason, timeout: 600_000 }, () => {
 		assert.ok(elapsed < timeoutMs - 5_000, `death should be seen via the SessionEnd hook, not the deadline (took ${elapsed}ms)`);
 	});
 
+	it("reuses one pane across runs and carries its conversation", async () => {
+		// reuse: true keys the pane by agent alone, so a second run must adopt the
+		// live pane rather than spawn a second one. Without adoption this passes
+		// the naming check but silently starts a fresh Claude with no context.
+		const repo = makeRepo("pi-tmux-e2e-reuse-");
+		trustRepoOnce(repo);
+		const asyncDir = path.join(path.dirname(repo), "async");
+		fs.mkdirSync(asyncDir, { recursive: true });
+
+		const run = (runId: string, prompt: string) =>
+			runTmuxPane(baseInput({
+				identity: { runId, stepIndex: 0, childIndex: 0, agent: "reuse-agent" },
+				cwd: repo,
+				asyncDir,
+				stepIndex: 0,
+				prompt,
+				reuse: true,
+			}));
+
+		const first = await run("e2e-reuse-1", "Remember this codeword: ZEPHYR42. Reply with exactly OK and nothing else.");
+		assert.equal(first.turnStatus, "completed");
+
+		const second = await run(
+			"e2e-reuse-2",
+			"What codeword did I ask you to remember earlier in this conversation? Reply with just the codeword, or NONE if you were not told one.",
+		);
+		assert.equal(second.turnStatus, "completed");
+
+		assert.equal(second.runner.paneId, first.runner.paneId, "the second run must adopt the first run's pane");
+		assert.match(second.output, /ZEPHYR42/, "reuse exists to carry conversation context across runs");
+
+		// Exactly one pane, not an orphan per run.
+		const live = tmux(["list-panes", "-a", "-F", "#{pane_id} #{@pi_claude_agent}"])
+			.split("\n")
+			.filter((line) => line.includes("reuse-agent"));
+		assert.equal(live.length, 1, `reuse must not leak a pane per run, saw ${live.length}`);
+	});
+
 	it("refuses to submit into an untrusted repository instead of answering the dialog", async () => {
 		// No trustRepoOnce here: a fresh repo is untrusted, so Claude opens its
 		// trust dialog and a paste would land in it.

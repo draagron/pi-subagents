@@ -134,6 +134,37 @@ export function buildClaudeCommand(options: SpawnPaneOptions & { settingsPath: s
 }
 
 /**
+ * Re-attach to a live pane from an earlier run, for `reuse: true`.
+ *
+ * Ownership cannot be held in memory across runs - each async run is its own
+ * process - so the pane is located through the tmux user options it was tagged
+ * with and the `meta.json` left in its state dir. Returns undefined whenever
+ * anything is missing or dead, so the caller simply spawns instead.
+ */
+async function adoptExistingPane(tmux: Tmux, stateDir: string, paneName: string): Promise<PaneMeta | undefined> {
+	let tagged: Awaited<ReturnType<Tmux["listTagged"]>>;
+	try {
+		tagged = await tmux.listTagged();
+	} catch {
+		return undefined;
+	}
+	const candidate = tagged.find((pane) => !pane.dead && pane.stateDir === stateDir);
+	if (!candidate) return undefined;
+	if (!(await tmux.paneExists(candidate.paneId))) return undefined;
+
+	let meta: PaneMeta;
+	try {
+		meta = JSON.parse(fs.readFileSync(path.join(stateDir, "meta.json"), "utf-8")) as PaneMeta;
+	} catch {
+		// Without meta.json the Claude session id is unknown, so the pane cannot
+		// be described honestly. Spawn a fresh one rather than guess.
+		return undefined;
+	}
+	if (typeof meta.claudeSessionId !== "string" || !meta.claudeSessionId) return undefined;
+	return { ...meta, paneId: candidate.paneId, paneName };
+}
+
+/**
  * Create a pane, tag it, take ownership, and wait until Claude is ready to
  * accept a paste.
  *
@@ -173,6 +204,20 @@ export async function spawnClaudePane(tmux: Tmux, options: SpawnPaneOptions): Pr
 		fs.mkdirSync(stateParent, { recursive: true });
 		const ignore = path.join(stateParent, ".gitignore");
 		if (!fs.existsSync(ignore)) fs.writeFileSync(ignore, "*\n");
+
+		// reuse: true means one pane per agent, carrying its Claude conversation
+		// across runs. Adopt the live pane if there is one; otherwise fall through
+		// and spawn, which also covers the first run.
+		if (options.reuse) {
+			const adopted = await adoptExistingPane(tmux, stateDir, paneName);
+			if (adopted) {
+				const pane = new ClaudePane(adopted, tmux);
+				pane.attach({ fromEnd: true });
+				pane.persist();
+				await pane.waitForPrompt();
+				return { pane, release };
+			}
+		}
 
 		const claudeSessionId = randomUUID();
 		const settingsPath = writeHookConfig(stateDir, {
