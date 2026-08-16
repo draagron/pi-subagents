@@ -18,8 +18,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
+import { enqueueStepSteer, steerAcksDir } from "../../src/runs/background/control-channel.ts";
 import { runTmuxPane } from "../../src/runs/shared/tmux-pane/runner.ts";
-import { resolveExecutableOnPath } from "../../src/runs/shared/tmux-pane/spawn.ts";
+import { paneNameForChild } from "../../src/runs/shared/tmux-pane/pane-identity.ts";
+import { paneStateDir, resolveExecutableOnPath } from "../../src/runs/shared/tmux-pane/spawn.ts";
 import { TrustDialogError } from "../../src/runs/shared/tmux-pane/pane.ts";
 import { resolveNodeExecutable } from "../../src/shared/node-executable.ts";
 
@@ -177,6 +179,74 @@ describe("tmux-pane runner e2e", { skip: skipReason, timeout: 600_000 }, () => {
 				if (j !== i) assert.ok(!result.output.includes(other), `child ${i} leaked child ${j}'s secret`);
 			}
 		}
+	});
+
+	it("relays a steer into a live pane without superseding the turn", async () => {
+		const repo = makeRepo("pi-tmux-e2e-steer-");
+		trustRepoOnce(repo);
+		const asyncDir = path.join(path.dirname(repo), "async");
+		fs.mkdirSync(asyncDir, { recursive: true });
+
+		const identity = { runId: "e2e-steer", stepIndex: 0, childIndex: 0, agent: "steer-agent" };
+		const stateDir = paneStateDir(asyncDir, paneNameForChild(identity));
+		const eventsPath = path.join(stateDir, "events.jsonl");
+
+		// A long generation keeps the turn open long enough to steer into it.
+		const pending = runTmuxPane(baseInput({
+			identity,
+			cwd: repo,
+			asyncDir,
+			stepIndex: 0,
+			prompt: "Count from 1 to 300, writing one number per line and nothing else. Do not use any tools.",
+		}));
+
+		// Wait until Claude has actually accepted the task before steering.
+		const deadline = Date.now() + 90_000;
+		while (Date.now() < deadline) {
+			if (fs.existsSync(eventsPath) && /"hook_event_name":"UserPromptSubmit"/.test(fs.readFileSync(eventsPath, "utf-8"))) break;
+			await new Promise((resolve) => setTimeout(resolve, 200));
+		}
+		assert.ok(fs.existsSync(eventsPath), "the turn should have started");
+
+		enqueueStepSteer(asyncDir, 0, {
+			type: "steer",
+			id: "steer-e2e-1",
+			ts: Date.now(),
+			message: "Additional note: when you are done counting, also say STEERED.",
+		});
+
+		const result = await pending;
+
+		// The steer must not have killed the turn it was steering.
+		assert.notEqual(result.turnStatus, "superseded", "a steer must not supersede its own turn");
+		assert.equal(result.turnStatus, "completed");
+
+		const ackDir = steerAcksDir(asyncDir, 0);
+		const acks = fs.existsSync(ackDir)
+			? fs.readdirSync(ackDir).map((file) => JSON.parse(fs.readFileSync(path.join(ackDir, file), "utf-8")) as { requestId: string; state: string })
+			: [];
+		const ack = acks.find((entry) => entry.requestId === "steer-e2e-1");
+		assert.ok(ack, `expected an acknowledgment for the steer, saw ${JSON.stringify(acks)}`);
+		// Claude queues input pasted mid-turn, so the honest receipt at this point
+		// is "queued"; "delivered" is only possible if it happened to submit while
+		// the relay was still running.
+		assert.ok(["queued", "delivered"].includes(ack.state), `unexpected ack state ${ack.state}`);
+
+		// The substantive claim is that the message really reached Claude, not
+		// merely that tmux accepted a paste. Claude picks queued input up at the
+		// next turn boundary, so wait for its own UserPromptSubmit to appear.
+		const promptIds = () =>
+			new Set(
+				fs.readFileSync(eventsPath, "utf-8").split("\n").filter(Boolean)
+					.map((line) => JSON.parse(line) as { hook_event_name: string; prompt_id?: string })
+					.filter((event) => event.hook_event_name === "UserPromptSubmit")
+					.map((event) => event.prompt_id),
+			);
+		const submitDeadline = Date.now() + 30_000;
+		while (Date.now() < submitDeadline && promptIds().size < 2) {
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		}
+		assert.ok(promptIds().size >= 2, `the steer should reach Claude as its own prompt, saw ${promptIds().size}`);
 	});
 
 	it("refuses to submit into an untrusted repository instead of answering the dialog", async () => {

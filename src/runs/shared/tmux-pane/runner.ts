@@ -133,35 +133,49 @@ function statusToResult(
 	}
 }
 
+function ackSteer(
+	input: TmuxPaneRunInput,
+	requestId: string,
+	state: "queued" | "delivered" | "failed",
+	message: string,
+): void {
+	try {
+		writeSteerAck(input.asyncDir, {
+			requestId,
+			index: input.stepIndex,
+			ts: Date.now(),
+			state,
+			...(state === "failed" ? {} : { deliveryStatus: state }),
+			message: message.slice(0, 990),
+		});
+	} catch {
+		// Acknowledgment is reporting, not control: never disturb a running turn.
+	}
+}
+
 /**
  * Consume this child's steer inbox on the pane's behalf.
  *
  * Native Pi children read the inbox themselves through env vars. A Claude pane
- * has no such channel, so the runner relays: paste on request, acknowledge only
- * when Claude reports a real UserPromptSubmit. That receipt comes from the
- * target application, which is a stronger guarantee than the native path's
- * timing window.
+ * has no such channel, so the runner relays the message in by bracketed paste.
+ *
+ * Acknowledgment is deliberately two-stage, because Claude Code QUEUES input
+ * pasted while it is mid-turn: measured against Claude Code 2.1.233, the
+ * steer's UserPromptSubmit fires roughly 80ms AFTER the steered turn's Stop,
+ * not during it. So a mid-turn steer influences the child's NEXT turn, not the
+ * one in flight, and a "delivered" receipt cannot arrive inside the turn it was
+ * aimed at.
+ *
+ * Reporting "delivered" on paste alone would therefore assert something untrue.
+ * Instead the paste acks `queued` - the protocol's own word for exactly this -
+ * and it is upgraded to `delivered` only if Claude's UserPromptSubmit is
+ * actually observed while the relay is still running.
  */
 function startSteerRelay(pane: ClaudePane, input: TmuxPaneRunInput): () => void {
 	const inbox = stepSteerInboxDir(input.asyncDir, input.stepIndex);
-	const pendingAcks = new Map<string, ReturnType<typeof setTimeout>>();
 
 	const unsubscribe = pane.onSteerDelivered((requestId) => {
-		const timer = pendingAcks.get(requestId);
-		if (timer) clearTimeout(timer);
-		pendingAcks.delete(requestId);
-		try {
-			writeSteerAck(input.asyncDir, {
-				requestId,
-				index: input.stepIndex,
-				ts: Date.now(),
-				state: "delivered",
-				deliveryStatus: "delivered",
-				message: "Delivered to the Claude pane and confirmed by UserPromptSubmit.",
-			});
-		} catch {
-			// A failed acknowledgment must not disturb the running turn.
-		}
+		ackSteer(input, requestId, "delivered", "Accepted by the Claude pane; confirmed by UserPromptSubmit.");
 	});
 
 	const timer = setInterval(() => {
@@ -175,36 +189,15 @@ function startSteerRelay(pane: ClaudePane, input: TmuxPaneRunInput): () => void 
 			void pane
 				.steer(request.id, request.message)
 				.then(() => {
-					// If Claude never reports the submit, the paste did not land.
-					const failTimer = setTimeout(() => {
-						pendingAcks.delete(request.id);
-						try {
-							writeSteerAck(input.asyncDir, {
-								requestId: request.id,
-								index: input.stepIndex,
-								ts: Date.now(),
-								state: "failed",
-								message: "Pasted into the pane but Claude never reported a submit.",
-							});
-						} catch {
-							// Best effort.
-						}
-					}, input.submitTimeoutMs ?? DEFAULT_SUBMIT_TIMEOUT_MS);
-					failTimer.unref?.();
-					pendingAcks.set(request.id, failTimer);
+					ackSteer(
+						input,
+						request.id,
+						"queued",
+						"Pasted into the Claude pane. Claude queues input received mid-turn, so it is picked up at the next turn boundary.",
+					);
 				})
 				.catch((error: unknown) => {
-					try {
-						writeSteerAck(input.asyncDir, {
-							requestId: request.id,
-							index: input.stepIndex,
-							ts: Date.now(),
-							state: "failed",
-							message: `Could not paste into the pane: ${error instanceof Error ? error.message : String(error)}`.slice(0, 990),
-						});
-					} catch {
-						// Best effort.
-					}
+					ackSteer(input, request.id, "failed", `Could not paste into the pane: ${error instanceof Error ? error.message : String(error)}`);
 				});
 		}
 	}, STEER_POLL_MS);
@@ -213,8 +206,6 @@ function startSteerRelay(pane: ClaudePane, input: TmuxPaneRunInput): () => void 
 	return () => {
 		clearInterval(timer);
 		unsubscribe();
-		for (const pending of pendingAcks.values()) clearTimeout(pending);
-		pendingAcks.clear();
 	};
 }
 

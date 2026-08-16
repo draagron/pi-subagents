@@ -345,9 +345,13 @@ export class ClaudePane {
 	 * Paste a steer message into a pane that is mid-turn.
 	 *
 	 * Registered as pending first, so the UserPromptSubmit it produces is read
-	 * as a delivery receipt rather than as a human superseding the turn. The
-	 * caller acknowledges only on that event - delivery confirmed by the target
-	 * application, not by a timing heuristic.
+	 * as a delivery receipt rather than as a human superseding the turn.
+	 *
+	 * Note that Claude queues input pasted mid-turn: its UserPromptSubmit
+	 * normally lands just after the current turn's Stop, so the receipt usually
+	 * arrives for the NEXT turn. The pending registration still matters, because
+	 * a steer submitted while Claude is between turns would otherwise be
+	 * mistaken for a human typing and would supersede the turn.
 	 */
 	async steer(requestId: string, message: string): Promise<void> {
 		this.pendingSteerIds.push(requestId);
