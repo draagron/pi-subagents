@@ -2260,9 +2260,10 @@ function applySingleAgentLaunchDefaults(params: SubagentParamsLike, agents: Agen
 	const parentTimeoutMs = params.timeoutMs === undefined && params.maxRuntimeMs === undefined && agent.defaultTimeoutMs === undefined && params.workflowParentDeadlineAt !== undefined
 		? Math.max(1, params.workflowParentDeadlineAt - Date.now())
 		: undefined;
+	const defaultAsync = agent.defaultAsync !== undefined ? agent.defaultAsync : isNonPiRunnerType(agent.runner?.type) ? true : undefined;
 	return {
 		...params,
-		...(params.async === undefined && agent.defaultAsync !== undefined ? { async: agent.defaultAsync } : {}),
+		...(params.async === undefined && defaultAsync !== undefined ? { async: defaultAsync } : {}),
 		...(params.timeoutMs === undefined && params.maxRuntimeMs === undefined && agent.defaultTimeoutMs !== undefined
 			? { timeoutMs: agent.defaultTimeoutMs }
 			: {}),
@@ -2982,6 +2983,14 @@ function prepareWorkflowChildLaunchParams(input: {
 	} else if (input.childParams.resume === undefined) {
 		const resolvedOutput = resolveWorkflowChildOutputPath({ ctxCwd: input.ctxCwd, workflowCwd: input.workflowCwd, artifactsDir: input.artifactsDir, workflowRunId: input.parentWorkflowRunId, aggregateOutputPath: input.aggregateOutputPath, configuredOutputBaseDir: input.configuredOutputBaseDir, discoverAgents: input.discoverAgents, workflowAgentScope: input.workflowAgentScope, key: input.workflowKey, params: input.childParams });
 		if (resolvedOutput) childParams = { ...input.childParams, output: resolvedOutput };
+	}
+	if (childParams.async !== true && typeof childParams.agent === "string") {
+		const agentScope = (input.workflowAgentScope as AgentScope) ?? "both";
+		const discovered = input.discoverAgents(input.ctxCwd, agentScope).agents;
+		const agentConfig = discovered.find((a) => a.name === childParams.agent);
+		if (agentConfig && (agentConfig.defaultAsync === true || isNonPiRunnerType(agentConfig.runner?.type))) {
+			childParams = { ...childParams, async: true };
+		}
 	}
 	return prepareWorkflowLaunchParams(input.workflowDefaults, childParams, input.parentWorkflowRunId, input.workflowKey, input.options);
 }

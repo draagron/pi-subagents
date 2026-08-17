@@ -709,6 +709,41 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		fs.rmSync(workflowResultPath, { force: true });
 	});
 
+	it("runs non-Pi runner agents through public single-child and workflow execution without explicit async", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const markerPath = path.join(tempDir, "external-public-started");
+		const executor = makeExecutor([
+			makeAgent("external", {
+				runner: { type: "external-cli", command: process.execPath, args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "started"); process.stdout.write("external result")`] },
+			}),
+		]);
+		const ctx = { ...makeMinimalCtx(tempDir), model: { provider: "mock", id: "parent-model" } };
+		const started = await executor.executePublic(
+			`external-public-${Date.now()}`,
+			{ agent: "external", task: "Run external" },
+			new AbortController().signal,
+			undefined,
+			ctx,
+		);
+
+		assert.equal(started.isError, undefined);
+		assert.ok(started.details.asyncId);
+		const workflowResultPath = path.join(DIRS.results, `${started.details.asyncId}.json`);
+		let workflowResult: { state?: string; results?: Array<{ output?: string; runId?: string }> } = {};
+		for (let attempt = 0; attempt < 100; attempt++) {
+			if (fs.existsSync(workflowResultPath)) workflowResult = JSON.parse(fs.readFileSync(workflowResultPath, "utf-8"));
+			if (workflowResult.state === "complete" || workflowResult.state === "failed") break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(workflowResult.state, "complete");
+		for (let attempt = 0; attempt < 100 && !fs.existsSync(markerPath); attempt++) {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(fs.readFileSync(markerPath, "utf-8"), "started");
+
+		fs.rmSync(started.details.asyncDir!, { recursive: true, force: true });
+		fs.rmSync(workflowResultPath, { force: true });
+	});
+
 	it("runs external CLI agents with fallback models without registry validation", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		const markerPath = path.join(tempDir, "external-fallback-started");
 		const executor = makeExecutor([

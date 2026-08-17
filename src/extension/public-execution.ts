@@ -1,6 +1,7 @@
 export interface PublicSubagentExecutionParams {
 	action?: unknown;
 	agent?: unknown;
+	async?: unknown;
 	task?: unknown;
 	step?: unknown;
 	tasks?: unknown;
@@ -115,6 +116,7 @@ export function normalizePublicSubagentExecution<T extends PublicSubagentExecuti
 			agent: params.agent.trim(),
 			...(params.task !== undefined ? { task: params.task } : {}),
 			output: output === undefined ? true : output,
+			...(params.async === true ? { async: true } : {}),
 		};
 		return {
 			ok: true,
