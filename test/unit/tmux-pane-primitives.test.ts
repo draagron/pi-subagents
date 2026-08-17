@@ -755,17 +755,21 @@ describe("tmux-pane focus", () => {
 		const dir = createTempDir();
 		const tmux = new FakeSpawnTmux();
 		try {
-			const stateRoot = path.join(dir, "async");
-			const stateDir = paneStateDir(stateRoot, paneNameForReuse("pair"));
-			fs.mkdirSync(stateDir, { recursive: true });
+			const paneName = paneNameForReuse("pair");
+			// The live pane belongs to an EARLIER run, so its state dir sits under
+			// that run's async dir - exactly as in production, where every run gets
+			// `async-subagent-runs/<run id>/`. Nothing about this run can compute it.
+			const olderStateDir = paneStateDir(path.join(dir, "async", "older-run"), paneName);
+			fs.mkdirSync(olderStateDir, { recursive: true });
 			fs.writeFileSync(
-				path.join(stateDir, "meta.json"),
-				JSON.stringify({ ...makeMeta(stateDir), paneName: paneNameForReuse("pair"), paneId: "%9", claudeSessionId: "sess-live" }),
+				path.join(olderStateDir, "meta.json"),
+				JSON.stringify({ ...makeMeta(olderStateDir), paneName, paneId: "%9", claudeSessionId: "sess-live" }),
 			);
 			tmux.tagged = [{
 				paneId: "%9",
 				agent: "pair",
-				stateDir,
+				paneName,
+				stateDir: olderStateDir,
 				runId: "older-run",
 				childKey: "s0-c0",
 				dead: false,
@@ -776,7 +780,7 @@ describe("tmux-pane focus", () => {
 			const { pane, release } = await spawnClaudePane(tmux as unknown as Tmux, {
 				identity: { runId: "run-2", stepIndex: 0, childIndex: 0, agent: "pair" },
 				cwd: dir,
-				stateRoot,
+				stateRoot: path.join(dir, "async", "run-2"),
 				claudeBin: "claude",
 				nodeBin: process.execPath,
 				reuse: true,
@@ -787,6 +791,51 @@ describe("tmux-pane focus", () => {
 
 			assert.equal(tmux.spawned, undefined, "the live pane must be adopted, not replaced");
 			assert.deepEqual(tmux.focused, ["%9"]);
+			// The adopted pane must be driven through the dir its own child writes
+			// hook events to; a dir computed for this run would never see a Stop.
+			assert.equal(pane.meta.stateDir, olderStateDir);
+			assert.equal(pane.meta.claudeSessionId, "sess-live");
+			// Re-tagged to the run that now owns it.
+			assert.ok(tmux.calls.includes("setPaneOption:@pi_subagent_run"));
+		} finally {
+			removeTempDir(dir);
+		}
+	});
+
+	it("does not mistake a per-child pane of the same agent for the shared reuse pane", async () => {
+		const dir = createTempDir();
+		const tmux = new FakeSpawnTmux();
+		try {
+			// An untagged-name pane from an older build falls back to the agent tag,
+			// so the reuse naming has to be what distinguishes it from a plain child.
+			const perChild = paneStateDir(path.join(dir, "async", "older-run"), "pi-older-run-s0-c0-pair");
+			fs.mkdirSync(perChild, { recursive: true });
+			fs.writeFileSync(path.join(perChild, "meta.json"), JSON.stringify({ ...makeMeta(perChild), claudeSessionId: "sess-child" }));
+			tmux.tagged = [{
+				paneId: "%9",
+				agent: "pair",
+				paneName: "",
+				stateDir: perChild,
+				runId: "older-run",
+				childKey: "s0-c0",
+				dead: false,
+				session: "main",
+				windowId: "@1",
+			}];
+
+			const { pane, release } = await spawnClaudePane(tmux as unknown as Tmux, {
+				identity: { runId: "run-2", stepIndex: 0, childIndex: 0, agent: "pair" },
+				cwd: dir,
+				stateRoot: path.join(dir, "async", "run-2"),
+				claudeBin: "claude",
+				nodeBin: process.execPath,
+				reuse: true,
+			});
+			pane.detach();
+			release();
+
+			assert.ok(tmux.spawned, "a per-child pane must not be adopted as the reuse pane");
+			assert.equal(pane.paneId, "%77");
 		} finally {
 			removeTempDir(dir);
 		}

@@ -13,6 +13,7 @@
 - Add `PI_SUBAGENT_FS_RETRY_MAX_TOTAL_MS` so a host embedding the extension can bound how long a contended filesystem retry blocks its thread. Unset by default. Thanks to [@MarcusNeufeldt](https://github.com/MarcusNeufeldt) for #1143.
 
 ### Fixed
+- Make `tmux-pane` `reuse: true` adopt across real runs. Adoption matched a pane whose recorded state dir equalled one computed from the *current* run's async dir, and every run gets its own (`async-subagent-runs/<run id>/`), so the paths never matched: each run spawned a fresh `pi-reuse-<agent>` pane and leaked the previous one. The pane is now found by name through a new `@pi_claude_pane_name` tag and driven through the state dir the pane itself advertises — which is required, not just convenient, since that path is where the live child's hooks append events and is fixed in its `--settings` at launch. The reuse e2e passed only because it handed both runs one shared async dir; it now uses a per-run dir like production.
 - Add explicit `isolation: "none"` for schema-driven workflows without Git worktree setup, while retaining strict `isolation: "worktree"` behavior. Thanks to [@tlsneo](https://github.com/tlsneo) for #1203.
 - Fail closed when an existing external-job `status.json` is unreadable or malformed, including an invalid `steps` shape, instead of starting a new provider job.
 - Describe `async:false` as a blocking parent wait, not a UI or foreground-only mode.

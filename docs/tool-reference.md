@@ -377,10 +377,12 @@ async: true
 | `size` | Size for `split` layout, e.g. `45%`. |
 | `focus` | Move the operator's cursor into the pane once it exists. Default `false`: a split pane is already visible, and focusing steals the cursor mid-keystroke — which a fan-out would do once per child. |
 | `interactive` | Let a human share the pane with the run. Default `false`. |
-| `reuse` | Reuse one pane per agent across runs to keep context. Refused for parallel or worktree children. |
+| `reuse` | Reuse one pane per agent across runs to keep context, which also stops repeat delegations from accumulating panes. Refused for parallel or worktree children. |
 | `extraArgs` | Extra argv appended verbatim. |
 
 Each logical child gets its own pane, named `pi-<runId>-s<step>-c<child>-<agent>`, so a `runs.all` fan-out of one agent produces one pane and one Claude conversation per child rather than interleaving them. Worktree isolation works normally: the pane opens at the child's resolved cwd.
+
+A `reuse: true` pane is named `pi-reuse-<agent>` instead, and is located across runs by that name through its tmux tags. Its state directory stays the one the run that spawned it created: that path is where the live child's hooks append events, fixed in its `--settings` at launch, and no later run can reconstruct it from its own async directory. Anything missing, dead, or unparseable falls through to a normal spawn, which is also what the first run does.
 
 The task is written to a file and delivered by bracketed paste, so no quoting or escaping path exists. Completion comes from the `Stop` hook, whose `last_assistant_message` is the child's output. Tool events come from `PreToolUse`, and a permission prompt raises `Notification`, which surfaces as needs-attention and pauses the turn deadline so waiting on a human does not consume the run's timeout.
 

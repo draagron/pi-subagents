@@ -1,5 +1,5 @@
 /**
- * Real tmux, no Claude: pane placement and focus.
+ * Real tmux, no Claude: pane placement, focus, and reuse adoption.
  *
  * The unit tests drive a faked tmux, which can prove the runner asks for the
  * right thing but not that tmux does it. These assert the two claims an operator
@@ -53,7 +53,7 @@ function writeStubClaude(dir: string): string {
 	return stub;
 }
 
-describe("tmux-pane placement and focus", { skip: skipReason, timeout: 120_000 }, () => {
+describe("tmux-pane placement, focus, and reuse", { skip: skipReason, timeout: 120_000 }, () => {
 	after(() => {
 		killSession(HOST_SESSION);
 		for (const dir of tempDirs) {
@@ -142,6 +142,43 @@ describe("tmux-pane placement and focus", { skip: skipReason, timeout: 120_000 }
 		} finally {
 			await pane.kill().catch(() => {});
 			release();
+		}
+	}));
+
+	it("adopts a reuse pane spawned by an earlier run, from a different async dir", withHostPane(async (_hostPane, dir) => {
+		// The production shape: every run has its own async dir, so the second run
+		// cannot compute where the first run's pane state lives. It has to find the
+		// pane by name and take the state dir from the pane's own tag.
+		const claudeBin = writeStubClaude(dir);
+		const spawn = (runId: string) => spawnClaudePane(new Tmux(), {
+			identity: { runId, stepIndex: 0, childIndex: 0, agent: "reuser" },
+			cwd: dir,
+			stateRoot: path.join(dir, "async", runId),
+			claudeBin,
+			nodeBin: process.execPath,
+			layout: "split",
+			reuse: true,
+		});
+
+		const first = await spawn("reuse-run-1");
+		first.pane.detach();
+		first.release();
+
+		const second = await spawn("reuse-run-2");
+		try {
+			assert.equal(second.pane.paneId, first.pane.paneId, "the second run must adopt the first run's pane");
+			assert.equal(second.pane.meta.stateDir, first.pane.meta.stateDir, "an adopted pane keeps the dir its own hooks write to");
+			assert.equal(second.pane.meta.claudeSessionId, first.pane.meta.claudeSessionId, "reuse exists to carry the same Claude session");
+			// Re-tagged to the owning run, and not leaking a pane per run.
+			assert.equal(paneField(second.pane.paneId, "#{@pi_subagent_run}"), "reuse-run-2");
+			const tagged = tmuxCli(["list-panes", "-a", "-F", "#{pane_id} #{@pi_claude_agent}"])
+				.split("\n")
+				.filter((line) => line.endsWith(" reuser"));
+			assert.equal(tagged.length, 1, `reuse must not leak a pane per run, saw ${tagged.length}`);
+		} finally {
+			second.pane.detach();
+			await second.pane.kill().catch(() => {});
+			second.release();
 		}
 	}));
 

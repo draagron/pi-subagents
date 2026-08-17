@@ -25,6 +25,7 @@ import {
 import {
 	PANE_OPTION_AGENT,
 	PANE_OPTION_CHILD,
+	PANE_OPTION_NAME,
 	PANE_OPTION_RUN,
 	PANE_OPTION_SESSION,
 	PANE_OPTION_STATE,
@@ -144,28 +145,44 @@ export function buildClaudeCommand(options: SpawnPaneOptions & { settingsPath: s
  * process - so the pane is located through the tmux user options it was tagged
  * with and the `meta.json` left in its state dir. Returns undefined whenever
  * anything is missing or dead, so the caller simply spawns instead.
+ *
+ * The pane is matched by NAME, and the state dir comes from the pane's own tag
+ * rather than from a path computed for this run. Both matter, and for the same
+ * reason: a reuse pane belongs to the run that spawned it, whose async dir is
+ * `.../async-subagent-runs/<that run id>/tmux-pane/<name>`. Nothing about this
+ * run can reconstruct that path, and the path is not merely a lookup key - it is
+ * where the live child's hooks append events, baked into its `--settings` at
+ * launch and unmovable while it runs. Adopting into a freshly computed dir would
+ * tail an events file nobody writes to, so the turn could only ever time out.
  */
-async function adoptExistingPane(tmux: Tmux, stateDir: string, paneName: string): Promise<PaneMeta | undefined> {
+async function adoptExistingPane(tmux: Tmux, paneName: string, agent: string): Promise<PaneMeta | undefined> {
 	let tagged: Awaited<ReturnType<Tmux["listTagged"]>>;
 	try {
 		tagged = await tmux.listTagged();
 	} catch {
 		return undefined;
 	}
-	const candidate = tagged.find((pane) => !pane.dead && pane.stateDir === stateDir);
+	// Fall back to the agent tag for panes spawned before pane names were tagged,
+	// but only together with the reuse naming, so a per-child pane of the same
+	// agent is never mistaken for the shared one.
+	const candidate = tagged.find((pane) =>
+		!pane.dead
+		&& pane.stateDir
+		&& (pane.paneName ? pane.paneName === paneName : pane.agent === agent && path.basename(pane.stateDir) === paneName),
+	);
 	if (!candidate) return undefined;
 	if (!(await tmux.paneExists(candidate.paneId))) return undefined;
 
 	let meta: PaneMeta;
 	try {
-		meta = JSON.parse(fs.readFileSync(path.join(stateDir, "meta.json"), "utf-8")) as PaneMeta;
+		meta = JSON.parse(fs.readFileSync(path.join(candidate.stateDir, "meta.json"), "utf-8")) as PaneMeta;
 	} catch {
 		// Without meta.json the Claude session id is unknown, so the pane cannot
 		// be described honestly. Spawn a fresh one rather than guess.
 		return undefined;
 	}
 	if (typeof meta.claudeSessionId !== "string" || !meta.claudeSessionId) return undefined;
-	return { ...meta, paneId: candidate.paneId, paneName };
+	return { ...meta, paneId: candidate.paneId, paneName, stateDir: candidate.stateDir };
 }
 
 /**
@@ -182,9 +199,17 @@ export async function spawnClaudePane(tmux: Tmux, options: SpawnPaneOptions): Pr
 
 	const agent = sanitizeAgentName(options.identity.agent);
 	const paneName = resolvePaneName(options.identity, options.reuse);
-	const stateDir = paneStateDir(options.stateRoot, paneName);
 
-	if (options.maxPanes !== undefined) {
+	// Probed before the ownership lock, because an adopted pane's state dir is
+	// the one its own child writes to - under the async dir of the run that
+	// spawned it - and the lock has to be taken on that dir, not on a path
+	// computed for this run.
+	const adopted = options.reuse ? await adoptExistingPane(tmux, paneName, agent) : undefined;
+	const stateDir = adopted?.stateDir ?? paneStateDir(options.stateRoot, paneName);
+
+	// Only a spawn consumes the ceiling; adopting a pane that already exists adds
+	// nothing to the count and must not be refused by it.
+	if (!adopted && options.maxPanes !== undefined) {
 		const live = (await tmux.listTagged()).filter((pane) => !pane.dead).length;
 		if (live >= options.maxPanes) {
 			throw new Error(
@@ -204,27 +229,32 @@ export async function spawnClaudePane(tmux: Tmux, options: SpawnPaneOptions): Pr
 
 	try {
 		// Hook scripts, task files and event logs are scratch; never commit them.
-		const stateParent = path.join(options.stateRoot, TMUX_PANE_STATE_DIRNAME);
+		// `dirname` rather than the run's own state root, so an adopted pane's
+		// existing directory is covered instead of a fresh, unrelated one.
+		const stateParent = path.dirname(stateDir);
 		fs.mkdirSync(stateParent, { recursive: true });
 		const ignore = path.join(stateParent, ".gitignore");
 		if (!fs.existsSync(ignore)) fs.writeFileSync(ignore, "*\n");
 
 		// reuse: true means one pane per agent, carrying its Claude conversation
-		// across runs. Adopt the live pane if there is one; otherwise fall through
-		// and spawn, which also covers the first run.
-		if (options.reuse) {
-			const adopted = await adoptExistingPane(tmux, stateDir, paneName);
-			if (adopted) {
-				const pane = new ClaudePane(adopted, tmux, { interactive: options.interactive ?? false });
-				pane.attach({ fromEnd: true });
-				pane.persist();
-				// An adopted pane never goes through spawnPane, so focus has to be
-				// applied here too - otherwise `focus` would work on the first run of a
-				// reused agent and silently stop working on every run after it.
-				if (options.focus) await tmux.focusPane(adopted.paneId);
-				await pane.waitForPrompt();
-				return { pane, release };
-			}
+		// across runs. An adopted pane needs no spawn; a first run, or one whose
+		// pane has since been closed, falls through and spawns.
+		if (adopted) {
+			const pane = new ClaudePane(adopted, tmux, { interactive: options.interactive ?? false });
+			pane.attach({ fromEnd: true });
+			pane.persist();
+			// Re-tag to this run, so status and observability point at the run that
+			// currently owns the pane. Naming is re-tagged too, which heals a pane
+			// spawned before pane names were tagged.
+			await tmux.setPaneOption(adopted.paneId, PANE_OPTION_NAME, paneName);
+			await tmux.setPaneOption(adopted.paneId, PANE_OPTION_RUN, options.identity.runId);
+			await tmux.setPaneOption(adopted.paneId, PANE_OPTION_CHILD, childKeyFor(options.identity));
+			// An adopted pane never goes through spawnPane, so focus has to be
+			// applied here too - otherwise `focus` would work on the first run of a
+			// reused agent and silently stop working on every run after it.
+			if (options.focus) await tmux.focusPane(adopted.paneId);
+			await pane.waitForPrompt();
+			return { pane, release };
 		}
 
 		const claudeSessionId = randomUUID();
@@ -271,6 +301,7 @@ export async function spawnClaudePane(tmux: Tmux, options: SpawnPaneOptions): Pr
 		});
 
 		await tmux.setPaneOption(paneId, PANE_OPTION_AGENT, agent);
+		await tmux.setPaneOption(paneId, PANE_OPTION_NAME, paneName);
 		await tmux.setPaneOption(paneId, PANE_OPTION_SESSION, claudeSessionId);
 		await tmux.setPaneOption(paneId, PANE_OPTION_STATE, stateDir);
 		await tmux.setPaneOption(paneId, PANE_OPTION_RUN, options.identity.runId);

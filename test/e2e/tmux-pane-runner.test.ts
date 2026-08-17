@@ -429,11 +429,16 @@ describe("tmux-pane runner e2e", { skip: skipReason, timeout: 600_000 }, () => {
 		// the naming check but silently starts a fresh Claude with no context.
 		const repo = makeRepo("pi-tmux-e2e-reuse-");
 		trustRepoOnce(repo);
-		const asyncDir = path.join(path.dirname(repo), "async");
-		fs.mkdirSync(asyncDir, { recursive: true });
 
-		const run = (runId: string, prompt: string) =>
-			runTmuxPane(baseInput({
+		// Each run gets its OWN async dir, because that is what production does:
+		// `async-subagent-runs/<run id>/`. Sharing one dir between the two runs
+		// makes this test pass against an implementation that cannot adopt anything
+		// - which is exactly how the reuse-by-state-dir bug survived.
+		const asyncRoot = path.join(path.dirname(repo), "async");
+		const run = (runId: string, prompt: string) => {
+			const asyncDir = path.join(asyncRoot, runId);
+			fs.mkdirSync(asyncDir, { recursive: true });
+			return runTmuxPane(baseInput({
 				identity: { runId, stepIndex: 0, childIndex: 0, agent: "reuse-agent" },
 				cwd: repo,
 				asyncDir,
@@ -441,6 +446,7 @@ describe("tmux-pane runner e2e", { skip: skipReason, timeout: 600_000 }, () => {
 				prompt,
 				reuse: true,
 			}));
+		};
 
 		const first = await run("e2e-reuse-1", "Remember this codeword: ZEPHYR42. Reply with exactly OK and nothing else.");
 		assert.equal(first.turnStatus, "completed");
@@ -453,14 +459,16 @@ describe("tmux-pane runner e2e", { skip: skipReason, timeout: 600_000 }, () => {
 
 		assert.equal(second.runner.paneId, first.runner.paneId, "the second run must adopt the first run's pane");
 		assert.match(second.output, /ZEPHYR42/, "reuse exists to carry conversation context across runs");
+		// The adopted pane keeps the state dir of the run that spawned it: that is
+		// where its child's hooks append events, fixed at launch by --settings.
+		assert.equal(second.runner.stateDir, paneStateDir(path.join(asyncRoot, "e2e-reuse-1"), second.runner.paneName ?? ""));
 
-		// Exactly one pane, not an orphan per run. Scope this to THIS test's state
-		// dir: the agent name alone would also count panes left by earlier runs of
+		// Exactly one pane, not an orphan per run. Scope this to THIS test's async
+		// root: the agent name alone would also count panes left by earlier runs of
 		// the suite, which live in the same tmux session.
-		const stateDir = paneStateDir(asyncDir, second.runner.paneName ?? "");
 		const live = tmux(["list-panes", "-a", "-F", "#{pane_id} #{@pi_claude_state}"])
 			.split("\n")
-			.filter((line) => line.includes(stateDir));
+			.filter((line) => line.includes(asyncRoot));
 		assert.equal(live.length, 1, `reuse must not leak a pane per run, saw ${live.length}`);
 	});
 

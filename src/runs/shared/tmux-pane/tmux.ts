@@ -21,11 +21,26 @@ export const PANE_OPTION_SESSION = "@pi_claude_session";
 export const PANE_OPTION_STATE = "@pi_claude_state";
 export const PANE_OPTION_RUN = "@pi_subagent_run";
 export const PANE_OPTION_CHILD = "@pi_subagent_child";
+/**
+ * The pane's logical name, which is the only run-independent handle on it.
+ *
+ * `reuse: true` has to find a pane created by an earlier run, and every other
+ * tag is per-run: the run id and child key change, and the state dir lives under
+ * the old run's async dir. The pane name does not.
+ */
+export const PANE_OPTION_NAME = "@pi_claude_pane_name";
 
 /** A pane tagged by this runner, as reported by `tmux list-panes`. */
 export interface TaggedPane {
 	paneId: string;
 	agent: string;
+	/** Logical pane name, from `@pi_claude_pane_name`. Empty on panes tagged before it existed. */
+	paneName: string;
+	/**
+	 * State dir this pane's own Claude writes hook events to, from
+	 * `@pi_claude_state`. Authoritative: the path was baked into the child's
+	 * `--settings` at launch and cannot be moved while it runs.
+	 */
 	stateDir: string;
 	/** Run this pane belongs to, from `@pi_subagent_run`. */
 	runId: string;
@@ -45,6 +60,7 @@ const PANE_FIELDS = [
 	"#{pane_dead}",
 	"#{session_name}",
 	"#{window_id}",
+	`#{${PANE_OPTION_NAME}}`,
 ].join("\t");
 
 interface ExecFailure {
@@ -148,6 +164,7 @@ export class Tmux {
 				dead: (parts[5] ?? "") === "1",
 				session: parts[6] ?? "",
 				windowId: parts[7] ?? "",
+				paneName: parts[8] ?? "",
 			});
 		}
 		return panes;
