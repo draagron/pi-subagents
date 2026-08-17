@@ -486,14 +486,25 @@ describe("tmux-pane runner e2e", { skip: skipReason, timeout: 600_000 }, () => {
 			...(control === "stop" ? { registerStop: register } : { registerTimeout: register }),
 		}));
 
-		// Let the turn actually start before acting on it.
+		// Act as soon as the turn is provably underway, rather than after a fixed
+		// wait: how long the child keeps generating is up to the model, and a
+		// short turn would finish before a fixed delay elapsed, leaving nothing
+		// to stop.
+		const eventsPath = path.join(
+			paneStateDir(asyncDir, paneNameForChild({ runId: `e2e-${control}`, stepIndex: 0, childIndex: 0, agent: `${control}-agent` })),
+			"events.jsonl",
+		);
 		const deadline = Date.now() + 90_000;
-		while (!fire && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
+		while (Date.now() < deadline) {
+			if (fire && fs.existsSync(eventsPath) && /"hook_event_name":"UserPromptSubmit"/.test(fs.readFileSync(eventsPath, "utf-8"))) break;
+			await new Promise((r) => setTimeout(r, 200));
+		}
 		assert.ok(fire, "the control callback should have been registered");
-		await new Promise((r) => setTimeout(r, 6_000));
+		await new Promise((r) => setTimeout(r, 1_500));
 		fire();
 
 		const result = await pending;
+		assert.notEqual(result.turnStatus, "completed", "the turn finished before it could be controlled; make the task longer");
 		await new Promise((r) => setTimeout(r, 500));
 		return { result, paneId };
 	}
