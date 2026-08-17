@@ -173,7 +173,16 @@ export class Tmux {
 		layout: "split" | "window";
 		size: string;
 		cwd: string;
-		target?: string;
+		/**
+		 * Session to create the window in, for `layout: "window"`.
+		 *
+		 * Must be a session, never a pane: `new-window -t %12` fails with "can't
+		 * specify pane here". Leave unset when running inside tmux, so the window
+		 * lands in the session tmux already resolves from $TMUX.
+		 */
+		targetSession?: string;
+		/** Pane to split, for `layout: "split"`. */
+		targetPane?: string;
 		windowName: string;
 		env: Record<string, string>;
 		command: string[];
@@ -183,7 +192,19 @@ export class Tmux {
 
 		const args =
 			opts.layout === "window"
-				? ["new-window", "-d", "-P", "-F", "#{pane_id}", "-n", opts.windowName, "-c", opts.cwd, ...env]
+				? [
+						"new-window",
+						"-d",
+						"-P",
+						"-F",
+						"#{pane_id}",
+						"-n",
+						opts.windowName,
+						"-c",
+						opts.cwd,
+						...(opts.targetSession ? ["-t", opts.targetSession] : []),
+						...env,
+					]
 				: [
 						"split-window",
 						"-h",
@@ -195,10 +216,9 @@ export class Tmux {
 						opts.size,
 						"-c",
 						opts.cwd,
-						...(opts.target ? ["-t", opts.target] : []),
+						...(opts.targetPane ? ["-t", opts.targetPane] : []),
 						...env,
 					];
-		if (opts.layout === "window" && opts.target) args.push("-t", opts.target);
 
 		const out = await this.run([...args, "--", ...opts.command], { timeoutMs: SPAWN_TIMEOUT_MS });
 		const paneId = out.trim().split("\n").pop()?.trim();

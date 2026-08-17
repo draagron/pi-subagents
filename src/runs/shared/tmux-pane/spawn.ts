@@ -227,14 +227,20 @@ export async function spawnClaudePane(tmux: Tmux, options: SpawnPaneOptions): Pr
 		const command = buildClaudeCommand({ ...options, settingsPath, claudeSessionId, paneName });
 
 		const layout = options.layout ?? DEFAULT_LAYOUT;
-		let target = tmux.selfPane;
+		// A window is created in a SESSION and a split is created from a PANE.
+		// Conflating the two is a real failure: passing this process's own pane id
+		// to `new-window -t` fails with "can't specify pane here", which is what
+		// happens whenever pi itself runs inside tmux.
+		let targetSession: string | undefined;
+		let targetPane = tmux.selfPane;
 		let effectiveLayout = layout;
 		if (!tmux.inside) {
 			// Not inside tmux, so there is no pane to split. Host children in a
 			// dedicated session the operator can attach to.
 			const fallback = options.fallbackSession ?? DEFAULT_FALLBACK_SESSION;
 			await tmux.ensureSession(fallback, options.cwd);
-			target = fallback;
+			targetSession = fallback;
+			targetPane = undefined;
 			effectiveLayout = "window";
 		}
 
@@ -242,7 +248,8 @@ export async function spawnClaudePane(tmux: Tmux, options: SpawnPaneOptions): Pr
 			layout: effectiveLayout,
 			size: options.size ?? DEFAULT_SPLIT_SIZE,
 			cwd: options.cwd,
-			...(target ? { target } : {}),
+			...(targetSession ? { targetSession } : {}),
+			...(targetPane ? { targetPane } : {}),
 			windowName: paneName,
 			// Counter semantics, not the extension's boolean guard: this process is
 			// already a subagent, so a boolean would refuse every spawn. Passing the

@@ -37,6 +37,11 @@ const skipReason = !optedIn
 			? "the claude CLI is not installed"
 			: undefined;
 
+// Captured before the suite clears them: one test needs the genuine
+// inside-tmux context back, because that path behaves differently.
+const OUTER_TMUX = process.env.TMUX;
+const OUTER_TMUX_PANE = process.env.TMUX_PANE;
+
 const tempDirs: string[] = [];
 
 function tmux(args: string[]): string {
@@ -530,6 +535,43 @@ describe("tmux-pane runner e2e", { skip: skipReason, timeout: 600_000 }, () => {
 		assert.equal(paneAlive(paneId), true, "timeout must preserve the pane for inspection");
 		assert.match(result.error ?? "", new RegExp(`Pane ${paneId.replace("%", "%")} was left running`));
 		assert.match(result.error ?? "", /partial work is in .*\.jsonl/);
+	});
+
+	it("spawns correctly when pi itself is running inside tmux", async () => {
+		// Every other test here runs with $TMUX cleared, so children land in a
+		// dedicated session. That is NOT what a real user hits: when pi runs inside
+		// tmux the runner targets the current session instead, and a window must be
+		// created in a session while a split is created from a pane. Passing this
+		// process's pane id to `new-window -t` fails with "can't specify pane
+		// here", which is exactly the bug this covers.
+		if (!OUTER_TMUX) {
+			// Cannot exercise the path if the suite itself is not inside tmux.
+			return;
+		}
+		const repo = makeRepo("pi-tmux-e2e-inside-");
+		trustRepoOnce(repo);
+		const asyncDir = path.join(path.dirname(repo), "async");
+		fs.mkdirSync(asyncDir, { recursive: true });
+
+		process.env.TMUX = OUTER_TMUX;
+		if (OUTER_TMUX_PANE) process.env.TMUX_PANE = OUTER_TMUX_PANE;
+		let paneId = "";
+		try {
+			const result = await runTmuxPane(baseInput({
+				identity: { runId: "e2e-inside", stepIndex: 0, childIndex: 0, agent: "inside-agent" },
+				cwd: repo,
+				asyncDir,
+				stepIndex: 0,
+				prompt: "Reply with exactly the single word INSIDE and nothing else. Do not use any tools.",
+				onRunnerStatus: (r: { paneId?: string }) => { paneId = r.paneId ?? ""; },
+			}));
+			assert.equal(result.turnStatus, "completed");
+			assert.equal(result.output.trim(), "INSIDE");
+		} finally {
+			delete process.env.TMUX;
+			delete process.env.TMUX_PANE;
+			if (paneId) killPane(paneId);
+		}
 	});
 
 	it("refuses to submit into an untrusted repository instead of answering the dialog", async () => {
