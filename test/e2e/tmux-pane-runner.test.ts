@@ -59,6 +59,14 @@ function killPane(paneId: string): void {
 	}
 }
 
+function paneAlive(paneId: string): boolean {
+	try {
+		return execFileSync("tmux", ["display-message", "-p", "-t", paneId, "#{pane_dead}"], { encoding: "utf-8" }).trim() === "0";
+	} catch {
+		return false;
+	}
+}
+
 function sleepSync(seconds: number): void {
 	execFileSync("sleep", [String(seconds)]);
 }
@@ -441,11 +449,76 @@ describe("tmux-pane runner e2e", { skip: skipReason, timeout: 600_000 }, () => {
 		assert.equal(second.runner.paneId, first.runner.paneId, "the second run must adopt the first run's pane");
 		assert.match(second.output, /ZEPHYR42/, "reuse exists to carry conversation context across runs");
 
-		// Exactly one pane, not an orphan per run.
-		const live = tmux(["list-panes", "-a", "-F", "#{pane_id} #{@pi_claude_agent}"])
+		// Exactly one pane, not an orphan per run. Scope this to THIS test's state
+		// dir: the agent name alone would also count panes left by earlier runs of
+		// the suite, which live in the same tmux session.
+		const stateDir = paneStateDir(asyncDir, second.runner.paneName ?? "");
+		const live = tmux(["list-panes", "-a", "-F", "#{pane_id} #{@pi_claude_state}"])
 			.split("\n")
-			.filter((line) => line.includes("reuse-agent"));
+			.filter((line) => line.includes(stateDir));
 		assert.equal(live.length, 1, `reuse must not leak a pane per run, saw ${live.length}`);
+	});
+
+	/**
+	 * Drive a long turn, then fire the registered control callback.
+	 *
+	 * Stop and timeout share the whole path and differ only in which seam the
+	 * async runner uses, so they are exercised through one helper.
+	 */
+	async function runAndControl(control: "stop" | "timeout", prefix: string) {
+		const repo = makeRepo(prefix);
+		trustRepoOnce(repo);
+		const asyncDir = path.join(path.dirname(repo), "async");
+		fs.mkdirSync(asyncDir, { recursive: true });
+
+		let fire: (() => void) | undefined;
+		let paneId = "";
+		const register = (fn: (() => void) | undefined) => { if (fn) fire = fn; };
+
+		const pending = runTmuxPane(baseInput({
+			identity: { runId: `e2e-${control}`, stepIndex: 0, childIndex: 0, agent: `${control}-agent` },
+			cwd: repo,
+			asyncDir,
+			stepIndex: 0,
+			prompt: "Count slowly from 1 to 3000, one number per line, nothing else. Do not use any tools.",
+			timeoutMs: 300_000,
+			onRunnerStatus: (r: { paneId?: string }) => { paneId = r.paneId ?? ""; },
+			...(control === "stop" ? { registerStop: register } : { registerTimeout: register }),
+		}));
+
+		// Let the turn actually start before acting on it.
+		const deadline = Date.now() + 90_000;
+		while (!fire && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
+		assert.ok(fire, "the control callback should have been registered");
+		await new Promise((r) => setTimeout(r, 6_000));
+		fire();
+
+		const result = await pending;
+		await new Promise((r) => setTimeout(r, 500));
+		return { result, paneId };
+	}
+
+	it("stops a child and tears its pane down", async () => {
+		const { result, paneId } = await runAndControl("stop", "pi-tmux-e2e-stop-");
+
+		assert.equal(result.stopped, true);
+		assert.notEqual(result.exitCode, 0, "a stopped child is not a success");
+		assert.equal(result.timedOut ?? false, false);
+		assert.equal(paneAlive(paneId), false, "stop must remove the pane");
+		// No Stop hook fires on an interrupt, so the transcript is the only route
+		// back to whatever the child had produced.
+		assert.match(result.error ?? "", /Partial work is in .*\.jsonl/);
+	});
+
+	it("times a child out, preserves its pane, and names it", async () => {
+		const { result, paneId } = await runAndControl("timeout", "pi-tmux-e2e-timeout-");
+
+		assert.equal(result.timedOut, true);
+		assert.notEqual(result.exitCode, 0);
+		assert.equal(result.stopped ?? false, false);
+		assert.equal(paneAlive(paneId), true, "timeout must preserve the pane for inspection");
+		assert.match(result.error ?? "", new RegExp(`Pane ${paneId.replace("%", "%")} was left running`));
+		assert.match(result.error ?? "", /partial work is in .*\.jsonl/);
 	});
 
 	it("refuses to submit into an untrusted repository instead of answering the dialog", async () => {

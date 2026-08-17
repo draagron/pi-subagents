@@ -59,6 +59,8 @@ export interface TmuxPaneRunInput {
 	timeoutMs?: number;
 	submitTimeoutMs?: number;
 	maxSubagentDepth?: number;
+	/** tmux session hosting panes when this process is not inside tmux. */
+	fallbackSession?: string;
 	/** Keep the pane after the turn so an operator can inspect it. */
 	preservePane?: boolean;
 	registerTimeout?: (stop: (() => void) | undefined) => void;
@@ -234,6 +236,7 @@ export async function runTmuxPane(input: TmuxPaneRunInput): Promise<TmuxPaneRunR
 		...(input.extraArgs ? { extraArgs: input.extraArgs } : {}),
 		...(input.appendSystemPrompt ? { appendSystemPrompt: input.appendSystemPrompt } : {}),
 		...(input.maxSubagentDepth !== undefined ? { maxSubagentDepth: input.maxSubagentDepth } : {}),
+		...(input.fallbackSession ? { fallbackSession: input.fallbackSession } : {}),
 	});
 
 	const runner: TmuxPaneRunnerStatus = {
