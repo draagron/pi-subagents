@@ -29,6 +29,7 @@ import type { ModelScopeConfig } from "../shared/model-scope.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { resolveExpectedWorktreeAgentCwd } from "../shared/worktree.ts";
 import { assertReuseAllowed } from "../shared/tmux-pane/pane-identity.ts";
+import { loadTmuxPaneDefaults, resolveTmuxPaneReuse } from "../shared/tmux-pane/defaults.ts";
 import { buildWorkflowGraphSnapshot } from "../shared/workflow-graph.ts";
 import { ChainOutputValidationError, validateChainOutputBindings } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime } from "../shared/structured-output.ts";
@@ -727,16 +728,24 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			// are rejected for tmux-pane where the run's params are in scope.
 			if (unsupported.length > 0) throw new AsyncStartValidationError(`Agent '${a.name}' uses runner.type='${externalRunnerType}' and does not support: ${unsupported.join(", ")}.`);
 		}
-		if (a.runner?.type === "tmux-pane" && a.runner.reuse === true) {
-			try {
-				assertReuseAllowed({
-					agent: a.name,
-					parallel: parallelOutputNamespace?.taskIndex !== undefined,
-					worktree: s.worktree === true,
-				});
-			} catch (error) {
-				throw new AsyncStartValidationError(error instanceof Error ? error.message : String(error));
+		// Reuse is decided here rather than in the detached runner, because it turns
+		// on whether this child is parallel or worktree-isolated - facts only the
+		// launch knows - and the decision is then baked into the step below.
+		let stepRunner = a.runner;
+		if (a.runner?.type === "tmux-pane") {
+			const paneChild = {
+				parallel: parallelOutputNamespace?.taskIndex !== undefined,
+				worktree: s.worktree === true,
+			};
+			const resolvedReuse = resolveTmuxPaneReuse(a.runner, loadTmuxPaneDefaults(), paneChild);
+			if (resolvedReuse.explicit && resolvedReuse.reuse) {
+				try {
+					assertReuseAllowed({ agent: a.name, ...paneChild });
+				} catch (error) {
+					throw new AsyncStartValidationError(error instanceof Error ? error.message : String(error));
+				}
 			}
+			stepRunner = { ...a.runner, reuse: resolvedReuse.reuse };
 		}
 		const stepCeiling = intersectSubagentCapabilityCeilings(params.capabilityCeiling, decodeSubagentCapabilityCeiling(process.env[SUBAGENT_CAPABILITY_CEILING_ENV]));
 		try {
@@ -839,7 +848,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			...(runFanoutPath ? { runFanoutPath } : {}),
 			agent: s.agent,
 			task,
-			...(a.runner ? { runner: a.runner } : {}),
+			...(stepRunner ? { runner: stepRunner } : {}),
 			...(params.contextForAgent ? { context: params.contextForAgent(s.agent) } : {}),
 			...(agentContract ? { agentContract } : {}),
 			phase: s.phase,
@@ -1563,6 +1572,24 @@ export function executeAsyncSingle(
 			return formatAsyncStartError("single", `Failed to persist async recovery descriptor for '${id}': ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
+
+	// Same reuse decision as the chain path, for a lone child: never parallel, but
+	// it can still be worktree-isolated, where one shared conversation would be
+	// driving a tree it does not belong to.
+	let singleRunner = agentConfig.runner;
+	if (agentConfig.runner?.type === "tmux-pane") {
+		const paneChild = { parallel: false, worktree: params.worktree === true };
+		const resolvedReuse = resolveTmuxPaneReuse(agentConfig.runner, loadTmuxPaneDefaults(), paneChild);
+		if (resolvedReuse.explicit && resolvedReuse.reuse) {
+			try {
+				assertReuseAllowed({ agent, ...paneChild });
+			} catch (error) {
+				return formatAsyncStartError("single", error instanceof Error ? error.message : String(error));
+			}
+		}
+		singleRunner = { ...agentConfig.runner, reuse: resolvedReuse.reuse };
+	}
+
 	let spawnResult: SpawnRunnerResult = {};
 	try {
 		spawnResult = spawnRunner(
@@ -1575,7 +1602,7 @@ export function executeAsyncSingle(
 						...(capabilityCeiling ? { capabilityCeiling } : {}),
 						agent,
 						task: taskText,
-						...(agentConfig.runner ? { runner: agentConfig.runner } : {}),
+						...(singleRunner ? { runner: singleRunner } : {}),
 						...(params.context ? { context: params.context } : {}),
 						cwd: runnerCwd,
 						model,

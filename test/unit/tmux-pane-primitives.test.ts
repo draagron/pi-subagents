@@ -14,7 +14,7 @@ import {
 	sanitizeAgentName,
 } from "../../src/runs/shared/tmux-pane/pane-identity.ts";
 import { ClaudePane, delay, type PaneMeta } from "../../src/runs/shared/tmux-pane/pane.ts";
-import { loadTmuxPaneDefaults, parseTmuxPaneDefaults, resolveTmuxPaneOptions } from "../../src/runs/shared/tmux-pane/defaults.ts";
+import { loadTmuxPaneDefaults, parseTmuxPaneDefaults, resolveTmuxPaneOptions, resolveTmuxPaneReuse } from "../../src/runs/shared/tmux-pane/defaults.ts";
 import { buildClaudeCommand, paneStateDir, resolvePaneName, spawnClaudePane } from "../../src/runs/shared/tmux-pane/spawn.ts";
 import type { Tmux } from "../../src/runs/shared/tmux-pane/tmux.ts";
 import { createTempDir, removeTempDir } from "../support/helpers.ts";
@@ -862,13 +862,47 @@ describe("tmux-pane config defaults", () => {
 			[{ size: "" }, /size must be a non-empty string/],
 			[{ focus: "yes" }, /focus must be a boolean/],
 			[{ interactive: 1 }, /interactive must be a boolean/],
-			[{ reuse: true }, /config\.tmuxPane\.reuse is not supported/],
+			[{ reuse: "always" }, /reuse must be a boolean/],
+			[{ model: "opus" }, /config\.tmuxPane\.model is not supported/],
 		];
 		for (const [value, expected] of cases) {
 			assert.throws(() => parseTmuxPaneDefaults(value), expected);
 		}
 		assert.equal(parseTmuxPaneDefaults(undefined), undefined);
 		assert.deepEqual(parseTmuxPaneDefaults({ size: " 40% " }), { size: "40%" });
+	});
+
+	it("withholds a defaulted reuse from children that cannot share a pane", () => {
+		const defaults = { reuse: true };
+		const lone = { parallel: false, worktree: false };
+
+		// A lone child gets the default: this is the point of it, so a new profile
+		// with nothing in its file still lands in one persistent pane.
+		assert.deepEqual(resolveTmuxPaneReuse({}, defaults, lone), { reuse: true, explicit: false, withheld: false });
+
+		// Fanned out or worktree-isolated, the default steps aside rather than
+		// failing the launch: a preference must not become a trap.
+		for (const child of [{ parallel: true, worktree: false }, { parallel: false, worktree: true }]) {
+			assert.deepEqual(resolveTmuxPaneReuse({}, defaults, child), { reuse: false, explicit: false, withheld: true });
+		}
+	});
+
+	it("keeps an explicit reuse explicit, so an impossible launch is still refused", () => {
+		const parallel = { parallel: true, worktree: false };
+		// Marked explicit for the caller to refuse; never silently withheld.
+		assert.deepEqual(resolveTmuxPaneReuse({ reuse: true }, { reuse: true }, parallel), {
+			reuse: true,
+			explicit: true,
+			withheld: false,
+		});
+		// An explicit false is also the author's call, and opts out of the default.
+		assert.deepEqual(resolveTmuxPaneReuse({ reuse: false }, { reuse: true }, { parallel: false, worktree: false }), {
+			reuse: false,
+			explicit: true,
+			withheld: false,
+		});
+		// No default, no reuse, nothing to refuse.
+		assert.deepEqual(resolveTmuxPaneReuse({}, {}, parallel), { reuse: false, explicit: false, withheld: false });
 	});
 
 	it("reads the tmuxPane block from disk and tolerates a config it cannot parse", () => {

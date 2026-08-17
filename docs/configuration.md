@@ -99,23 +99,35 @@ Set `enabled` to `false` (or remove the block) as a kill switch. In that state, 
     "layout": "split",
     "size": "40%",
     "focus": false,
-    "interactive": true
+    "interactive": true,
+    "reuse": true
   }
 }
 ```
 
-Defaults for every agent profile with `runner.type: tmux-pane`. How a pane is presented is an operator preference rather than a property of the agent — the same profile wants a hidden window during a fan-out and a visible split next to pi for a single delegation — so these four fields can be set once here instead of in each profile.
+Defaults for every agent profile with `runner.type: tmux-pane`. How a pane is presented is an operator preference rather than a property of the agent — the same profile wants a hidden window during a fan-out and a visible split next to pi while you are still developing it — so these fields can be set once here instead of in each profile.
 
 | Field | Default | Meaning |
 |---|---|---|
 | `layout` | `window` | `split` divides the pane pi is running in, so the child is visible immediately. `window` opens a separate, unselected tmux window. |
-| `size` | `45%` | Size of the new pane, for `layout: split` only. |
+| `size` | `45%` | Size of the new pane, for `layout: split` only. Ignored by `window`. |
 | `focus` | `false` | Move the cursor into the pane once it exists. Leave `false` to see the pane without losing your place in pi. |
 | `interactive` | `false` | Let a human type into the pane while the run owns it. See "tmux pane agent profiles" in the tool reference for what this trades away. |
+| `reuse` | `false` | One long-lived pane per agent, carrying its Claude conversation across runs, instead of a pane per child. |
 
-Agent frontmatter wins field by field, and `false` in a profile is how it opts out of a default set here. Nothing else about a pane is defaultable: `model`, `permissionMode`, tool allowlists and `reuse` change what the child may do, and a global default there would silently re-scope every profile.
+Agent frontmatter wins field by field, and `false` in a profile is how it opts out of a default set here. Nothing else is defaultable: `model`, `permissionMode`, tool allowlists and `extraArgs` change what the child may *do*, and a global default there would silently re-scope every profile.
 
-With `layout: split`, remember that a pane outlives the turn that created it — panes are only torn down on an explicit stop, so successive delegations divide one window until tmux refuses with `no space for new pane`. Pair a split layout with `reuse: true` on the profile (one long-lived pane per agent, context carried across runs) or keep `window` for fan-out work.
+### Developing a pane agent
+
+The defaults above support working a new profile from "watch it beside me" to "run it unattended" by adding one line at a time, with nothing in the profile to begin with:
+
+| Stage | In the profile | Result |
+|---|---|---|
+| Trying it out | nothing | Visible 40% split beside pi, shared with you, one persistent pane |
+| Trusted, but still watched | `layout: window` | Own window, still shared with you when you switch to it |
+| Unattended | `interactive: false` | Own window; a prompt you type there now fails the child loudly instead of being adopted |
+
+**A defaulted `reuse` is withheld rather than enforced.** `reuse` cannot hold for a parallel or worktree-isolated child — one pane is one Claude conversation, and concurrent or differently-rooted children would interleave in it. Where the value came from decides what happens: a profile that sets `reuse: true` has asserted something about that agent, so an incompatible launch is refused at start; a config default only says what you usually want, so it steps aside and the child gets its own pane. That way a config-wide `reuse: true` never turns a fan-out into a failure, and you never need a `reuse` line in a profile you fan out. The effective value is recorded in the step's runner status, so you can see which one a child ran under.
 
 ## `asyncByDefault`
 

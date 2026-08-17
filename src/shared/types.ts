@@ -2048,6 +2048,13 @@ export interface TmuxPaneDefaultsConfig {
 	size?: string;
 	focus?: boolean;
 	interactive?: boolean;
+	/**
+	 * Default `reuse`. Withheld from parallel and worktree children rather than
+	 * refusing them: a default states a preference for the common case, while
+	 * `reuse` in a profile asserts something about that agent and is still
+	 * refused where it cannot hold.
+	 */
+	reuse?: boolean;
 }
 
 export interface MainWindowRendererConfig {
