@@ -11,6 +11,13 @@
  *
  * An interrupted turn emits no Stop, so the wait also resolves on abort, on a
  * superseding prompt, on SessionEnd, and on timeout.
+ *
+ * A prompt the runner did not send is a human sharing the pane. By default that
+ * ends the turn as `superseded`, because the answer to someone else's question
+ * cannot be attributed to the delegated task. `interactive: true` trades that
+ * guarantee for collaboration: the human's prompt is adopted as the turn's
+ * prompt, the deliverable becomes the answer to the newest instruction, and the
+ * count of human prompts is reported so the result is never read as unattended.
  */
 
 import { randomUUID } from "node:crypto";
@@ -61,6 +68,11 @@ export interface TurnRecord {
 	 * permission prompt must not consume the run's timeout budget.
 	 */
 	blockedDurationMs: number;
+	/**
+	 * Prompts a human submitted into the pane and this turn adopted, under
+	 * `interactive: true`. Absent means the turn is the runner's alone.
+	 */
+	humanTurns?: number;
 }
 
 export interface PaneMeta extends ChildIdentity {
@@ -123,16 +135,20 @@ export class ClaudePane {
 	 */
 	private readonly pendingSteerIds: string[] = [];
 	private readonly steerListeners = new Set<(requestId: string, promptId?: string) => void>();
+	private readonly humanTurnListeners = new Set<(turn: TurnRecord) => void>();
 
 	readonly meta: PaneMeta;
 	private readonly tmux: Tmux;
 	/** Pause between the bracketed paste and Enter, so the editor absorbs it. */
 	private readonly pasteSettleMs: number;
+	/** Adopt a human's prompt into the running turn instead of superseding it. */
+	private readonly interactive: boolean;
 
-	constructor(meta: PaneMeta, tmux: Tmux, options?: { pasteSettleMs?: number }) {
+	constructor(meta: PaneMeta, tmux: Tmux, options?: { pasteSettleMs?: number; interactive?: boolean }) {
 		this.meta = meta;
 		this.tmux = tmux;
 		this.pasteSettleMs = options?.pasteSettleMs ?? 250;
+		this.interactive = options?.interactive ?? false;
 		this.transcriptPath = meta.transcriptPath;
 		this.tail = new EventTail(meta.stateDir);
 	}
@@ -205,6 +221,10 @@ export class ClaudePane {
 						}
 						return;
 					}
+					if (this.interactive) {
+						this.adoptHumanPrompt(turn, event.prompt_id);
+						return;
+					}
 					this.finish(turn, "superseded", { note: "another prompt was submitted in the pane" });
 				}
 				return;
@@ -252,6 +272,49 @@ export class ClaudePane {
 			default:
 				return;
 		}
+	}
+
+	/**
+	 * Interactive mode: make a human's prompt this turn's prompt.
+	 *
+	 * Re-keying to the new prompt id is what keeps the turn alive - the Stop that
+	 * completes it is now the one answering the human, and a Stop for the prompt
+	 * the runner sent is no longer expected, because Claude abandoned it the
+	 * moment the human interrupted.
+	 *
+	 * The deadline is re-based rather than merely paused. A human conversing in
+	 * the pane produces no event between their keystrokes, so there is no span to
+	 * pause over; without a re-base a ten-minute conversation would time out a
+	 * turn that is progressing perfectly well. Banked blocked time resets with it,
+	 * because it was measured against the old start and would otherwise be
+	 * subtracted twice.
+	 */
+	private adoptHumanPrompt(turn: TurnRecord, promptId?: string): void {
+		if (promptId) turn.promptId = promptId;
+		turn.humanTurns = (turn.humanTurns ?? 0) + 1;
+		turn.note =
+			`a human submitted ${turn.humanTurns === 1 ? "a prompt" : `${turn.humanTurns} prompts`} in the pane; ` +
+			`the result answers the newest one`;
+		turn.sentAt = Date.now();
+		turn.blockedDurationMs = 0;
+		this.blockedSince = undefined;
+		appendLocalEvent(this.meta.stateDir, {
+			hook_event_name: "PiHumanTurn",
+			...(promptId ? { prompt_id: promptId } : {}),
+		});
+		for (const listener of [...this.humanTurnListeners]) {
+			try {
+				listener(turn);
+			} catch {
+				// Reporting a shared turn must not end the turn being shared.
+			}
+		}
+	}
+
+	/** Notified when a human's prompt is adopted into the running turn. */
+	onHumanTurn(listener: (turn: TurnRecord) => void): () => void {
+		this.humanTurnListeners.add(listener);
+		return () => this.humanTurnListeners.delete(listener);
 	}
 
 	private finish(turn: TurnRecord, status: TurnStatus, extra?: { note?: string }): void {

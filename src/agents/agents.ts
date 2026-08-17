@@ -1595,6 +1595,12 @@ export function parseTmuxPaneRunnerFrontmatter(runner: Record<string, unknown>, 
 	if (runner.reuse !== undefined && typeof runner.reuse !== "boolean") {
 		throw new Error(`Agent '${agentName}' tmux-pane runner reuse must be a boolean.`);
 	}
+	if (runner.focus !== undefined && typeof runner.focus !== "boolean") {
+		throw new Error(`Agent '${agentName}' tmux-pane runner focus must be a boolean.`);
+	}
+	if (runner.interactive !== undefined && typeof runner.interactive !== "boolean") {
+		throw new Error(`Agent '${agentName}' tmux-pane runner interactive must be a boolean.`);
+	}
 	const RUNNER_OWNED_FLAGS = ["--settings", "--session-id"];
 	const extraArgsRaw = parseTmuxPaneStringArray(runner.extraArgs, agentName, "extraArgs");
 	const conflicting = (extraArgsRaw ?? []).filter((arg) => RUNNER_OWNED_FLAGS.includes(arg));
@@ -1624,6 +1630,8 @@ export function parseTmuxPaneRunnerFrontmatter(runner: Record<string, unknown>, 
 		"layout",
 		"size",
 		"reuse",
+		"focus",
+		"interactive",
 		"extraArgs",
 	]);
 	const unknown = Object.keys(runner).filter((key) => !supported.has(key));
@@ -1640,6 +1648,10 @@ export function parseTmuxPaneRunnerFrontmatter(runner: Record<string, unknown>, 
 		...(runner.layout ? { layout: runner.layout as "split" | "window" } : {}),
 		...(typeof runner.size === "string" ? { size: runner.size.trim() } : {}),
 		...(runner.reuse === true ? { reuse: true } : {}),
+		// Kept when explicitly false, unlike reuse: `false` in a profile is how an
+		// author opts out of a config-level default, so it must survive parsing.
+		...(typeof runner.focus === "boolean" ? { focus: runner.focus } : {}),
+		...(typeof runner.interactive === "boolean" ? { interactive: runner.interactive } : {}),
 		...(extraArgs?.length ? { extraArgs } : {}),
 	};
 }

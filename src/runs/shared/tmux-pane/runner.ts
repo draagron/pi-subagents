@@ -33,6 +33,8 @@ export interface TmuxPaneRunResult {
 	/** Interrupted with context intact, so the run can be resumed. */
 	paused?: boolean;
 	turnStatus: TurnStatus;
+	/** Prompts a human submitted into the pane, under `interactive: true`. */
+	humanTurns?: number;
 	runner: TmuxPaneRunnerStatus;
 }
 
@@ -53,6 +55,10 @@ export interface TmuxPaneRunInput {
 	addDirs?: string[];
 	layout?: "split" | "window";
 	size?: string;
+	/** Move the operator's cursor into the pane once it exists. */
+	focus?: boolean;
+	/** Let a human share the pane: their prompts extend the turn, not fail it. */
+	interactive?: boolean;
 	reuse?: boolean;
 	extraArgs?: string[];
 	appendSystemPrompt?: string;
@@ -76,6 +82,17 @@ export interface TmuxPaneRunInput {
 }
 
 function statusToResult(
+	turn: TurnRecord,
+	runner: TmuxPaneRunnerStatus,
+	input: TmuxPaneRunInput,
+): TmuxPaneRunResult {
+	const result = describeTurn(turn, runner, input);
+	// Carried on every outcome, not just success: knowing a human was in the pane
+	// is exactly what explains an unexpected result or an odd timeout.
+	return turn.humanTurns ? { ...result, humanTurns: turn.humanTurns } : result;
+}
+
+function describeTurn(
 	turn: TurnRecord,
 	runner: TmuxPaneRunnerStatus,
 	input: TmuxPaneRunInput,
@@ -232,6 +249,8 @@ export async function runTmuxPane(input: TmuxPaneRunInput): Promise<TmuxPaneRunR
 		...(input.addDirs ? { addDirs: input.addDirs } : {}),
 		...(input.layout ? { layout: input.layout } : {}),
 		...(input.size ? { size: input.size } : {}),
+		...(input.focus !== undefined ? { focus: input.focus } : {}),
+		...(input.interactive !== undefined ? { interactive: input.interactive } : {}),
 		...(input.reuse ? { reuse: input.reuse } : {}),
 		...(input.extraArgs ? { extraArgs: input.extraArgs } : {}),
 		...(input.appendSystemPrompt ? { appendSystemPrompt: input.appendSystemPrompt } : {}),
@@ -268,6 +287,13 @@ export async function runTmuxPane(input: TmuxPaneRunInput): Promise<TmuxPaneRunR
 	const unsubscribeEvents = pane.tail.subscribe((event) => {
 		if (event.hook_event_name === "PreToolUse" && event.tool_name) input.onToolEvent?.(event.tool_name);
 		if (event.hook_event_name === "Notification") input.onNeedsAttention?.(event.message ?? "waiting for input");
+	});
+	// Published while the turn is still running: a human joining the pane changes
+	// how the eventual output must be read, and an operator watching status is
+	// entitled to see that as it happens rather than only in the final result.
+	const unsubscribeHumanTurns = pane.onHumanTurn((turn) => {
+		runner.humanTurns = turn.humanTurns;
+		input.onRunnerStatus?.(runner);
 	});
 
 	try {
@@ -341,6 +367,7 @@ export async function runTmuxPane(input: TmuxPaneRunInput): Promise<TmuxPaneRunR
 		input.registerStop?.(undefined);
 		stopSteerRelay?.();
 		unsubscribeEvents();
+		unsubscribeHumanTurns();
 		// An explicit stop tears the pane down; everything else leaves it alive.
 		// The pane's context is the only thing that makes resume possible, and a
 		// timed-out or failed child is worth inspecting.

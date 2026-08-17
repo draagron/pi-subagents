@@ -140,6 +140,7 @@ import { acquireSessionLease, type SessionLeaseRequest } from "../shared/session
 import { buildExternalCliPrompt, runExternalCli } from "../shared/external-cli-runner.ts";
 import { runExternalJob } from "../shared/external-job-runner.ts";
 import { runTmuxPane } from "../shared/tmux-pane/runner.ts";
+import { loadTmuxPaneDefaults, resolveTmuxPaneOptions } from "../shared/tmux-pane/defaults.ts";
 import { resolveExecutableOnPath } from "../shared/tmux-pane/spawn.ts";
 import { resolveNodeExecutable } from "../../shared/node-executable.ts";
 import { createOrcaProgressTab, type OrcaProgressTab } from "../shared/orca-progress-tabs.ts";
@@ -1373,6 +1374,10 @@ async function runSingleStepInner(
 
 	if (step.runner?.type === "tmux-pane") {
 		const paneConfig = step.runner;
+		// Presentation is an operator preference, so the extension config supplies
+		// what the profile leaves unset. Resolved here rather than at launch because
+		// this is the process that actually creates the pane.
+		const paneDefaults = resolveTmuxPaneOptions(paneConfig, loadTmuxPaneDefaults());
 		const outputSnapshot = captureSingleOutputSnapshot(step.outputPath);
 		const paneRun = await runTmuxPane(omitUndefinedProperties({
 			identity: { runId: ctx.id, stepIndex: ctx.flatIndex, childIndex: ctx.flatIndex, agent: step.agent },
@@ -1389,8 +1394,10 @@ async function runSingleStepInner(
 			allowedTools: paneConfig.allowedTools,
 			disallowedTools: paneConfig.disallowedTools,
 			addDirs: paneConfig.addDirs,
-			layout: paneConfig.layout,
-			size: paneConfig.size,
+			layout: paneDefaults.layout,
+			size: paneDefaults.size,
+			focus: paneDefaults.focus,
+			interactive: paneDefaults.interactive,
 			reuse: paneConfig.reuse,
 			extraArgs: paneConfig.extraArgs,
 			registerTimeout: ctx.registerTimeout,

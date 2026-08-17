@@ -7,6 +7,7 @@ import { validateMissionStoreConfig } from "../missions/store.ts";
 import { validateAuthorityPolicy } from "../policy/authority.ts";
 import { getAgentDir } from "../shared/utils.ts";
 import { validatePermissionConfig } from "../runs/shared/permissions.ts";
+import { parseTmuxPaneDefaults } from "../runs/shared/tmux-pane/defaults.ts";
 
 const ARTIFACT_DIR_PREFERENCES = new Set<ArtifactDirPreference>(["project", "session", "temp"]);
 const FLEET_KEYBINDING_ACTION_SET = new Set<string>(FLEET_KEYBINDING_ACTIONS);
@@ -118,6 +119,9 @@ function validateConfig(config: Record<string, unknown>): void {
 	validateArtifactConfig(config.artifactConfig);
 	validateMainWindowRendererConfig(config.mainWindowRenderer);
 	validateOrcaProgressTabsConfig(config.orcaProgressTabs);
+	// Reuses the runner's own parser, so what `saveConfig` accepts is exactly what
+	// the async runner will later read back off disk.
+	parseTmuxPaneDefaults(config.tmuxPane);
 }
 
 export function getConfigPath(): string {

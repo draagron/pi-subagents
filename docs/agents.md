@@ -90,6 +90,21 @@ Do not ask clarifying questions; state assumptions and proceed.
 
 The final assistant message of each turn is the child's output, so the agent body should say so explicitly: nothing else the child prints is read. See "tmux pane agent profiles" in the tool reference for the full field list, the capability boundary, and the next-turn steering semantics.
 
+`layout: window` above keeps the child off screen, which is what a fan-out wants. To watch and work in the pane yourself while pi runs in tmux, make it a visible split you are allowed to type into:
+
+```yaml
+runner:
+  type: tmux-pane
+  program: claude
+  permissionMode: acceptEdits
+  layout: split
+  size: 40%
+  interactive: true
+  reuse: true
+```
+
+`layout: split` divides pi's own pane, so the child appears beside it; `interactive: true` makes a prompt you type there extend the turn instead of failing it; `reuse: true` keeps one long-lived pane per agent, which also stops repeat delegations from slicing the window into unusable strips. Add `focus: true` to have the cursor moved into the pane as well. The same four fields can be set once for every pane profile under `tmuxPane` in the extension config — see "Configuration".
+
 ### Advisory runner data boundary
 
 Native `oracle` runs inside Pi and can use its configured read tools. `claude-advisor` sends the assembled prompt to the configured local external CLI through stdin. `gpt-pro` sends the assembled prompt to the registered Surf provider. Provider options and a prompt digest are persisted in Pi run state. The prompt text is delivered through the local host bridge to the provider and is not stored in the public result payload. Do not place secrets in advisory prompts unless the target provider is approved to receive them.

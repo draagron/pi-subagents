@@ -260,6 +260,24 @@ export class Tmux {
 		await this.run(["send-keys", "-t", paneId, key]);
 	}
 
+	/**
+	 * Bring a pane into view and put the cursor in it.
+	 *
+	 * Selecting the window first matters for `layout: "window"`, where the pane is
+	 * in a window the operator is not looking at; `select-pane` alone would move
+	 * the cursor inside a window that stays hidden. The window id is resolved
+	 * explicitly rather than passing the pane id to `select-window`, which is not
+	 * a window target.
+	 *
+	 * Best-effort throughout: focus is a courtesy, and losing a race with a
+	 * closing pane must never fail the child whose work is otherwise fine.
+	 */
+	async focusPane(paneId: string): Promise<void> {
+		const windowId = (await this.tryRun(["display-message", "-p", "-t", paneId, "#{window_id}"]))?.trim();
+		if (windowId) await this.tryRun(["select-window", "-t", windowId]);
+		await this.tryRun(["select-pane", "-t", paneId]);
+	}
+
 	async capture(paneId: string, lines: number): Promise<string> {
 		const out = await this.tryRun(["capture-pane", "-p", "-t", paneId, "-S", `-${lines}`]);
 		return out ?? "";

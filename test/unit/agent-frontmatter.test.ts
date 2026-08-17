@@ -266,6 +266,36 @@ Your final message of each turn is the deliverable.`);
 		assert.deepEqual(discoverAgents(project, "project").agents.find((a) => a.name === "claude-implementer")?.runner, agent.runner);
 	}));
 
+	it("parses a shared, focused tmux-pane profile and keeps an explicit false", () => withTempHome(() => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tmux-pane-interactive-"));
+		tempDirs.push(project);
+		writeAgent(path.join(project, ".pi", "agents", "pair.md"), `---
+name: pair
+description: A Claude pane the operator works in alongside the run
+runner:
+  type: tmux-pane
+  layout: split
+  size: 40%
+  focus: true
+  interactive: true
+async: true
+---
+Body`);
+		writeAgent(path.join(project, ".pi", "agents", "solo.md"), "---\nname: solo\ndescription: Solo\nrunner:\n  type: tmux-pane\n  interactive: false\n---\nBody");
+
+		const agents = discoverAgents(project, "project").agents;
+		assert.deepEqual(agents.find((a) => a.name === "pair")?.runner, {
+			type: "tmux-pane",
+			layout: "split",
+			size: "40%",
+			focus: true,
+			interactive: true,
+		});
+		// `false` must survive parsing: it is how a profile opts out of a
+		// config-level default, which dropping the key would silently re-enable.
+		assert.deepEqual(agents.find((a) => a.name === "solo")?.runner, { type: "tmux-pane", interactive: false });
+	}));
+
 	it("defaults tmux-pane optional fields rather than inventing values", () => withTempHome(() => {
 		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-tmux-pane-minimal-"));
 		tempDirs.push(project);
@@ -281,6 +311,8 @@ Your final message of each turn is the deliverable.`);
 			["type: tmux-pane\n  permissionMode: yolo", /permissionMode must be one of/],
 			["type: tmux-pane\n  layout: floating", /layout must be 'split' or 'window'/],
 			["type: tmux-pane\n  reuse: sometimes", /reuse must be a boolean/],
+			["type: tmux-pane\n  focus: yes-please", /focus must be a boolean/],
+			["type: tmux-pane\n  interactive: maybe", /interactive must be a boolean/],
 			["type: tmux-pane\n  model: ''", /model must be a non-empty Claude model alias/],
 			["type: tmux-pane\n  size: ''", /size must be a non-empty string/],
 			["type: tmux-pane\n  allowedTools: nope", /allowedTools must be an array of non-empty strings/],

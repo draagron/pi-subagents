@@ -54,6 +54,10 @@ export interface SpawnPaneOptions {
 	addDirs?: string[];
 	layout?: "split" | "window";
 	size?: string;
+	/** Select the pane once it exists, moving the operator's cursor into it. */
+	focus?: boolean;
+	/** Adopt prompts a human types into the pane instead of failing the turn. */
+	interactive?: boolean;
 	extraArgs?: string[];
 	appendSystemPrompt?: string;
 	/** Install the PreToolUse hook so tool activity streams back. */
@@ -211,9 +215,13 @@ export async function spawnClaudePane(tmux: Tmux, options: SpawnPaneOptions): Pr
 		if (options.reuse) {
 			const adopted = await adoptExistingPane(tmux, stateDir, paneName);
 			if (adopted) {
-				const pane = new ClaudePane(adopted, tmux);
+				const pane = new ClaudePane(adopted, tmux, { interactive: options.interactive ?? false });
 				pane.attach({ fromEnd: true });
 				pane.persist();
+				// An adopted pane never goes through spawnPane, so focus has to be
+				// applied here too - otherwise `focus` would work on the first run of a
+				// reused agent and silently stop working on every run after it.
+				if (options.focus) await tmux.focusPane(adopted.paneId);
 				await pane.waitForPrompt();
 				return { pane, release };
 			}
@@ -278,9 +286,13 @@ export async function spawnClaudePane(tmux: Tmux, options: SpawnPaneOptions): Pr
 			stateDir,
 			createdAt: Date.now(),
 		};
-		const pane = new ClaudePane(meta, tmux);
+		const pane = new ClaudePane(meta, tmux, { interactive: options.interactive ?? false });
 		pane.attach({ fromEnd: true });
 		pane.persist();
+
+		// Focus after tagging, so the pane an operator lands in is already a fully
+		// registered child rather than one a concurrent process could still adopt.
+		if (options.focus) await tmux.focusPane(paneId);
 
 		// Claude must render its prompt before it will accept a paste. This also
 		// surfaces the workspace trust dialog as a specific error.

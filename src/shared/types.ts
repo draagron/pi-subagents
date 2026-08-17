@@ -1311,6 +1311,18 @@ export type AgentRunnerConfig =
 		size?: string;
 		/** Reuse a pane across runs for context continuity. Default false. */
 		reuse?: boolean;
+		/**
+		 * Move the operator's cursor into the pane once it exists. Default false:
+		 * a `split` pane is already visible, and focusing steals the cursor from
+		 * whatever the operator was typing - which a fan-out would do N times.
+		 */
+		focus?: boolean;
+		/**
+		 * Let a human share the pane with the run. Default false, which fails the
+		 * child when a prompt it did not send is submitted, because the result
+		 * could not otherwise be attributed. See ClaudePane for the trade.
+		 */
+		interactive?: boolean;
 		/** Extra argv appended verbatim. */
 		extraArgs?: string[];
 	};
@@ -1386,6 +1398,14 @@ export interface TmuxPaneRunnerStatus {
 	stateDir?: string;
 	transcriptPath?: string;
 	cwd?: string;
+	/**
+	 * Prompts a human submitted into the pane, under `interactive: true`.
+	 *
+	 * Present and non-zero means the output answers a human's instruction rather
+	 * than only the delegated task, so a reader can tell a shared result from an
+	 * unattended one. Absent means nobody typed into the pane.
+	 */
+	humanTurns?: number;
 	capabilities: {
 		stop: true;
 		steer: true;
@@ -2015,6 +2035,21 @@ export interface OrcaProgressTabsConfig {
 	enabled?: boolean;
 }
 
+/**
+ * Defaults for every `runner.type: 'tmux-pane'` agent, so an operator who wants
+ * visible, shared panes sets it once instead of editing each agent profile.
+ *
+ * Agent frontmatter always wins: this only supplies the value a profile leaves
+ * unset. Every field is optional, and an omitted block keeps the built-in
+ * defaults (a detached `window`, unfocused, not shared with a human).
+ */
+export interface TmuxPaneDefaultsConfig {
+	layout?: "split" | "window";
+	size?: string;
+	focus?: boolean;
+	interactive?: boolean;
+}
+
 export interface MainWindowRendererConfig {
 	/** Unit of horizontal space in main chat subagent call/result rows. Omit to preserve current spacing. Set 0 for no extra padding. */
 	horizontalSpacing?: number;
@@ -2044,6 +2079,8 @@ export interface ExtensionConfig {
 	mainWindowRenderer?: MainWindowRendererConfig;
 	/** Experimental observer: mirror each native subagent's progress into a new Orca tab. */
 	orcaProgressTabs?: OrcaProgressTabsConfig;
+	/** Defaults for tmux-pane agents. Agent frontmatter overrides each field. */
+	tmuxPane?: TmuxPaneDefaultsConfig;
 	forceTopLevelAsync?: boolean;
 	waitTool?: WaitToolConfig;
 	defaultSessionDir?: string;

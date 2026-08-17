@@ -91,6 +91,32 @@ The integration is off by default and supports macOS and Linux. It is disabled o
 
 Set `enabled` to `false` (or remove the block) as a kill switch. In that state, `pi-subagents` does not invoke `orca` and creates no Orca tabs. The temporary mirror files contain child output, use private file modes where supported, and are removed shortly after the child finishes. Each mirror is capped at 1 MiB. The observer stops accepting progress when the cap or stream backpressure is reached and appends a truncation notice. The viewer removes terminal control sequences with parser state that persists across file reads. On completion, the viewer exits back to the Orca terminal's shell prompt; the tab and its terminal scrollback remain open until the user closes the tab. A successfully completed native Pi child with a recorded session ends with a safely quoted `rm -- <exact-session-path>` command; failed, stopped, timed-out, and sessionless children do not show the removal command.
 
+## `tmuxPane`
+
+```json
+{
+  "tmuxPane": {
+    "layout": "split",
+    "size": "40%",
+    "focus": false,
+    "interactive": true
+  }
+}
+```
+
+Defaults for every agent profile with `runner.type: tmux-pane`. How a pane is presented is an operator preference rather than a property of the agent — the same profile wants a hidden window during a fan-out and a visible split next to pi for a single delegation — so these four fields can be set once here instead of in each profile.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `layout` | `window` | `split` divides the pane pi is running in, so the child is visible immediately. `window` opens a separate, unselected tmux window. |
+| `size` | `45%` | Size of the new pane, for `layout: split` only. |
+| `focus` | `false` | Move the cursor into the pane once it exists. Leave `false` to see the pane without losing your place in pi. |
+| `interactive` | `false` | Let a human type into the pane while the run owns it. See "tmux pane agent profiles" in the tool reference for what this trades away. |
+
+Agent frontmatter wins field by field, and `false` in a profile is how it opts out of a default set here. Nothing else about a pane is defaultable: `model`, `permissionMode`, tool allowlists and `reuse` change what the child may do, and a global default there would silently re-scope every profile.
+
+With `layout: split`, remember that a pane outlives the turn that created it — panes are only torn down on an explicit stop, so successive delegations divide one window until tmux refuses with `no space for new pane`. Pair a split layout with `reuse: true` on the profile (one long-lived pane per agent, context carried across runs) or keep `window` for fan-out work.
+
 ## `asyncByDefault`
 
 ```json

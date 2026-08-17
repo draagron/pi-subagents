@@ -14,7 +14,8 @@ import {
 	sanitizeAgentName,
 } from "../../src/runs/shared/tmux-pane/pane-identity.ts";
 import { ClaudePane, delay, type PaneMeta } from "../../src/runs/shared/tmux-pane/pane.ts";
-import { buildClaudeCommand, resolvePaneName } from "../../src/runs/shared/tmux-pane/spawn.ts";
+import { loadTmuxPaneDefaults, parseTmuxPaneDefaults, resolveTmuxPaneOptions } from "../../src/runs/shared/tmux-pane/defaults.ts";
+import { buildClaudeCommand, paneStateDir, resolvePaneName, spawnClaudePane } from "../../src/runs/shared/tmux-pane/spawn.ts";
 import type { Tmux } from "../../src/runs/shared/tmux-pane/tmux.ts";
 import { createTempDir, removeTempDir } from "../support/helpers.ts";
 
@@ -62,10 +63,18 @@ function makeMeta(stateDir: string, overrides: Partial<PaneMeta> = {}): PaneMeta
 	};
 }
 
-function makePane(stateDir: string, tmux: FakeTmux, overrides: Partial<PaneMeta> = {}): ClaudePane {
+function makePane(
+	stateDir: string,
+	tmux: FakeTmux,
+	overrides: Partial<PaneMeta> = {},
+	options: { interactive?: boolean } = {},
+): ClaudePane {
 	fs.mkdirSync(stateDir, { recursive: true });
 	fs.writeFileSync(path.join(stateDir, "events.jsonl"), "");
-	const pane = new ClaudePane(makeMeta(stateDir, overrides), tmux as unknown as Tmux, { pasteSettleMs: 0 });
+	const pane = new ClaudePane(makeMeta(stateDir, overrides), tmux as unknown as Tmux, {
+		pasteSettleMs: 0,
+		...(options.interactive !== undefined ? { interactive: options.interactive } : {}),
+	});
 	pane.attach();
 	return pane;
 }
@@ -531,6 +540,101 @@ describe("tmux-pane turn state machine", () => {
 		}
 	});
 
+	it("adopts a human's prompt as the turn's prompt when interactive", async () => {
+		const dir = createTempDir();
+		const tmux = new FakeTmux();
+		const stateDir = path.join(dir, "state");
+		const pane = makePane(stateDir, tmux, {}, { interactive: true });
+		const stopDriver = startTailDriver(pane);
+		try {
+			const turn = await pane.send("task");
+			appendLocalEvent(stateDir, { hook_event_name: "UserPromptSubmit", prompt_id: "mine" });
+			await delay(60);
+			appendLocalEvent(stateDir, { hook_event_name: "UserPromptSubmit", prompt_id: "human" });
+			await delay(60);
+			assert.equal(turn.status, "running", "a human prompt must extend the turn, not end it");
+
+			// The Stop that completes the turn is now the human's, and the one the
+			// runner originally asked for will never arrive.
+			appendLocalEvent(stateDir, { hook_event_name: "Stop", prompt_id: "human", last_assistant_message: "shared answer" });
+			const finished = await pane.awaitTurn(turn, { timeoutMs: 3_000, submitTimeoutMs: 2_000, tickMs: 25 });
+
+			assert.equal(finished.status, "completed");
+			assert.equal(finished.text, "shared answer");
+			assert.equal(finished.humanTurns, 1);
+			assert.match(finished.note ?? "", /a human submitted a prompt in the pane/);
+		} finally {
+			stopDriver();
+			pane.detach();
+			removeTempDir(dir);
+		}
+	});
+
+	it("reports every adopted human prompt and notifies a listener", async () => {
+		const dir = createTempDir();
+		const tmux = new FakeTmux();
+		const stateDir = path.join(dir, "state");
+		const pane = makePane(stateDir, tmux, {}, { interactive: true });
+		const stopDriver = startTailDriver(pane);
+		try {
+			const turn = await pane.send("task");
+			const counts: (number | undefined)[] = [];
+			pane.onHumanTurn((shared) => counts.push(shared.humanTurns));
+
+			appendLocalEvent(stateDir, { hook_event_name: "UserPromptSubmit", prompt_id: "mine" });
+			await delay(60);
+			appendLocalEvent(stateDir, { hook_event_name: "UserPromptSubmit", prompt_id: "human-1" });
+			await delay(60);
+			appendLocalEvent(stateDir, { hook_event_name: "UserPromptSubmit", prompt_id: "human-2" });
+			await delay(60);
+
+			assert.deepEqual(counts, [1, 2]);
+			assert.equal(turn.status, "running");
+			assert.match(turn.note ?? "", /a human submitted 2 prompts in the pane/);
+
+			// Only the newest prompt completes the turn: an earlier one was abandoned.
+			appendLocalEvent(stateDir, { hook_event_name: "Stop", prompt_id: "human-1", last_assistant_message: "stale" });
+			await delay(60);
+			assert.equal(turn.status, "running");
+			appendLocalEvent(stateDir, { hook_event_name: "Stop", prompt_id: "human-2", last_assistant_message: "newest" });
+			const finished = await pane.awaitTurn(turn, { timeoutMs: 3_000, submitTimeoutMs: 2_000, tickMs: 25 });
+			assert.equal(finished.text, "newest");
+			assert.equal(finished.humanTurns, 2);
+		} finally {
+			stopDriver();
+			pane.detach();
+			removeTempDir(dir);
+		}
+	});
+
+	it("re-bases the turn deadline when a human takes over", async () => {
+		const dir = createTempDir();
+		const tmux = new FakeTmux();
+		const stateDir = path.join(dir, "state");
+		const pane = makePane(stateDir, tmux, {}, { interactive: true });
+		const stopDriver = startTailDriver(pane);
+		try {
+			const turn = await pane.send("task");
+			appendLocalEvent(stateDir, { hook_event_name: "UserPromptSubmit", prompt_id: "mine" });
+			const pending = pane.awaitTurn(turn, { timeoutMs: 300, submitTimeoutMs: 5_000, tickMs: 25 });
+
+			await delay(200);
+			appendLocalEvent(stateDir, { hook_event_name: "UserPromptSubmit", prompt_id: "human" });
+			// Past the original deadline, but the clock restarted with the human's
+			// prompt: a conversation in the pane must not time out work in progress.
+			await delay(220);
+			assert.equal(turn.status, "running");
+
+			appendLocalEvent(stateDir, { hook_event_name: "Stop", prompt_id: "human", last_assistant_message: "done" });
+			const finished = await pending;
+			assert.equal(finished.status, "completed");
+		} finally {
+			stopDriver();
+			pane.detach();
+			removeTempDir(dir);
+		}
+	});
+
 	it("subtracts banked blocked time from effective elapsed", () => {
 		const dir = createTempDir();
 		const tmux = new FakeTmux();
@@ -561,6 +665,185 @@ describe("tmux-pane turn state machine", () => {
 			await assert.rejects(() => pane.waitForPrompt({ timeoutMs: 500 }), /trust dialog/i);
 		} finally {
 			pane.detach();
+			removeTempDir(dir);
+		}
+	});
+});
+
+/**
+ * A tmux stand-in complete enough for `spawnClaudePane`, recording the calls in
+ * order so tests can assert not just that focus happened but when.
+ */
+class FakeSpawnTmux {
+	readonly calls: string[] = [];
+	spawned: Parameters<Tmux["spawnPane"]>[0] | undefined;
+	focused: string[] = [];
+	tagged: Awaited<ReturnType<Tmux["listTagged"]>> = [];
+	insideTmux = true;
+
+	get inside(): boolean {
+		return this.insideTmux;
+	}
+
+	get selfPane(): string | undefined {
+		return this.insideTmux ? "%1" : undefined;
+	}
+
+	async listTagged(): Promise<Awaited<ReturnType<Tmux["listTagged"]>>> {
+		return this.tagged;
+	}
+
+	async spawnPane(opts: Parameters<Tmux["spawnPane"]>[0]): Promise<string> {
+		this.calls.push("spawnPane");
+		this.spawned = opts;
+		return "%77";
+	}
+
+	async setPaneOption(_paneId: string, name: string): Promise<void> {
+		this.calls.push(`setPaneOption:${name}`);
+	}
+
+	async focusPane(paneId: string): Promise<void> {
+		this.calls.push("focusPane");
+		this.focused.push(paneId);
+	}
+
+	async paneExists(): Promise<boolean> {
+		return true;
+	}
+
+	async capture(): Promise<string> {
+		return "│ > ";
+	}
+
+	async killPane(): Promise<void> {}
+}
+
+describe("tmux-pane focus", () => {
+	it("focuses a freshly spawned pane only when asked, and only after tagging it", async () => {
+		for (const focus of [true, false]) {
+			const dir = createTempDir();
+			const tmux = new FakeSpawnTmux();
+			try {
+				const { pane, release } = await spawnClaudePane(tmux as unknown as Tmux, {
+					identity: { runId: "run-1", stepIndex: 0, childIndex: 0, agent: "pair" },
+					cwd: dir,
+					stateRoot: path.join(dir, "async"),
+					claudeBin: "claude",
+					nodeBin: process.execPath,
+					layout: "split",
+					focus,
+				});
+				pane.detach();
+				release();
+
+				assert.deepEqual(tmux.focused, focus ? ["%77"] : []);
+				if (focus) {
+					// Focus must come last: an operator dropped into a half-registered
+					// pane could be sharing one another process is still free to adopt.
+					assert.equal(tmux.calls.at(-1), "focusPane");
+					assert.equal(tmux.calls.at(0), "spawnPane");
+					assert.ok(tmux.calls.includes("setPaneOption:@pi_subagent_child"));
+				}
+			} finally {
+				removeTempDir(dir);
+			}
+		}
+	});
+
+	it("focuses a reused pane it adopted, not just one it spawned", async () => {
+		const dir = createTempDir();
+		const tmux = new FakeSpawnTmux();
+		try {
+			const stateRoot = path.join(dir, "async");
+			const stateDir = paneStateDir(stateRoot, paneNameForReuse("pair"));
+			fs.mkdirSync(stateDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(stateDir, "meta.json"),
+				JSON.stringify({ ...makeMeta(stateDir), paneName: paneNameForReuse("pair"), paneId: "%9", claudeSessionId: "sess-live" }),
+			);
+			tmux.tagged = [{
+				paneId: "%9",
+				agent: "pair",
+				stateDir,
+				runId: "older-run",
+				childKey: "s0-c0",
+				dead: false,
+				session: "main",
+				windowId: "@1",
+			}];
+
+			const { pane, release } = await spawnClaudePane(tmux as unknown as Tmux, {
+				identity: { runId: "run-2", stepIndex: 0, childIndex: 0, agent: "pair" },
+				cwd: dir,
+				stateRoot,
+				claudeBin: "claude",
+				nodeBin: process.execPath,
+				reuse: true,
+				focus: true,
+			});
+			pane.detach();
+			release();
+
+			assert.equal(tmux.spawned, undefined, "the live pane must be adopted, not replaced");
+			assert.deepEqual(tmux.focused, ["%9"]);
+		} finally {
+			removeTempDir(dir);
+		}
+	});
+});
+
+describe("tmux-pane config defaults", () => {
+	it("lets agent frontmatter win over config, including an explicit false", () => {
+		assert.deepEqual(
+			resolveTmuxPaneOptions({ layout: "window", focus: false }, { layout: "split", size: "45%", focus: true, interactive: true }),
+			{ layout: "window", size: "45%", focus: false, interactive: true },
+		);
+	});
+
+	it("keeps built-in defaults when neither the profile nor the config sets a field", () => {
+		assert.deepEqual(resolveTmuxPaneOptions({}), {});
+		assert.deepEqual(resolveTmuxPaneOptions({}, { interactive: true }), { interactive: true });
+	});
+
+	it("rejects a malformed tmuxPane config block with a specific message", () => {
+		const cases: [unknown, RegExp][] = [
+			[[], /must be a JSON object/],
+			[{ layout: "floating" }, /layout must be "split" or "window"/],
+			[{ size: "" }, /size must be a non-empty string/],
+			[{ focus: "yes" }, /focus must be a boolean/],
+			[{ interactive: 1 }, /interactive must be a boolean/],
+			[{ reuse: true }, /config\.tmuxPane\.reuse is not supported/],
+		];
+		for (const [value, expected] of cases) {
+			assert.throws(() => parseTmuxPaneDefaults(value), expected);
+		}
+		assert.equal(parseTmuxPaneDefaults(undefined), undefined);
+		assert.deepEqual(parseTmuxPaneDefaults({ size: " 40% " }), { size: "40%" });
+	});
+
+	it("reads the tmuxPane block from disk and tolerates a config it cannot parse", () => {
+		const dir = createTempDir();
+		try {
+			const good = path.join(dir, "good.json");
+			fs.writeFileSync(good, JSON.stringify({ asyncByDefault: true, tmuxPane: { layout: "split", interactive: true } }));
+			assert.deepEqual(loadTmuxPaneDefaults(good), { layout: "split", interactive: true });
+
+			const noBlock = path.join(dir, "no-block.json");
+			fs.writeFileSync(noBlock, JSON.stringify({ asyncByDefault: true }));
+			assert.deepEqual(loadTmuxPaneDefaults(noBlock), {});
+
+			// A broken config must not fail a delegation that would otherwise run
+			// under the built-in defaults.
+			const broken = path.join(dir, "broken.json");
+			fs.writeFileSync(broken, "{ not json");
+			assert.deepEqual(loadTmuxPaneDefaults(broken), {});
+			assert.deepEqual(loadTmuxPaneDefaults(path.join(dir, "missing.json")), {});
+
+			const invalidBlock = path.join(dir, "invalid-block.json");
+			fs.writeFileSync(invalidBlock, JSON.stringify({ tmuxPane: { layout: "floating" } }));
+			assert.deepEqual(loadTmuxPaneDefaults(invalidBlock), {});
+		} finally {
 			removeTempDir(dir);
 		}
 	});

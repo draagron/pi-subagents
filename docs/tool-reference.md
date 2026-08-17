@@ -364,6 +364,8 @@ runner:
 async: true
 ```
 
+`layout`, `size`, `focus`, and `interactive` can also be set once for every pane profile under `tmuxPane` in the extension config; see "Configuration". Frontmatter wins field by field.
+
 | Field | Meaning |
 |---|---|
 | `program` | Interactive CLI to host. `claude` only. |
@@ -371,8 +373,10 @@ async: true
 | `permissionMode` | One of `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`. |
 | `allowedTools` / `disallowedTools` | Passed to Claude. Advisory: enforced by Claude, not by Pi. |
 | `addDirs` | Extra directories Claude may access. |
-| `layout` | `window` (default) or `split`. |
+| `layout` | `window` (default) or `split`. `window` opens a separate, unselected tmux window; `split` divides the pane pi itself runs in, so the child is visible as soon as it starts. |
 | `size` | Size for `split` layout, e.g. `45%`. |
+| `focus` | Move the operator's cursor into the pane once it exists. Default `false`: a split pane is already visible, and focusing steals the cursor mid-keystroke — which a fan-out would do once per child. |
+| `interactive` | Let a human share the pane with the run. Default `false`. |
 | `reuse` | Reuse one pane per agent across runs to keep context. Refused for parallel or worktree children. |
 | `extraArgs` | Extra argv appended verbatim. |
 
@@ -385,6 +389,14 @@ Supported: status artifacts, output logs, timeout, stop, interrupt-as-pause, res
 A tool permission prompt raises Claude's `Notification` hook, which surfaces as needs-attention and pauses the turn deadline. Note the hook fires for tool permission prompts but **not** for plan-mode approval: a child left waiting at a plan-approval dialog is not reported as blocked and its deadline keeps running, so prefer a non-plan `permissionMode` for unattended children.
 
 `extraArgs` must not contain `--settings` or `--session-id`; both are rejected at validation. A second `--settings` replaces the generated hook configuration rather than merging with it, which would leave the child with no completion signal at all.
+
+**A visible pane outlives the turn that created it.** Panes are only torn down on an explicit stop; a completed, timed-out, or failed child leaves Claude alive so the work can be inspected and resumed. With `layout: split` that means successive delegations keep dividing one window until tmux refuses with `no space for new pane`, so pair a split with `reuse: true` (one long-lived pane per agent) or keep `window` for fan-out work.
+
+**`interactive: true` trades attribution for collaboration.** By default, a prompt the runner did not send ends the turn as `superseded`: the child's next answer would be a reply to someone else's question, and reporting it as the delegated task's result would be a lie. Under `interactive: true` that prompt is adopted instead — it becomes the turn's prompt, the `Stop` that answers it completes the run, and the deliverable is the answer to the newest instruction in the pane, whoever typed it. Three consequences to plan for:
+
+- The turn deadline is re-based on every adopted prompt. A human conversing in the pane produces no events between keystrokes, so there is no span to pause over; without the re-base a ten-minute conversation would time out work that is progressing fine. The count restarts from the human's prompt, so `timeoutMs` bounds each leg rather than the whole session.
+- The number of adopted prompts is reported as `humanTurns` on the runner status and in the step's artifact metadata, and a `PiHumanTurn` entry is appended to the pane's event log. A non-zero `humanTurns` is the signal that a result was shared rather than unattended; treat it as a reason to read the output rather than trust it.
+- A prompt the human submits after the turn's own `Stop` has already landed is just a conversation in a pane the run no longer owns, and changes nothing about the recorded result.
 
 **Steering has next-turn semantics.** Claude queues input pasted while it is mid-turn, so a steer aimed at a running turn is picked up at the next turn boundary rather than altering the turn in flight. Acknowledgments reflect this: a successful paste acks `queued`, and `delivered` is only reported when Claude's own `UserPromptSubmit` is observed. This differs from native Pi steering, which reaches the running turn.
 

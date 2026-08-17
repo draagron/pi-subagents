@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Add `runner.focus` and `runner.interactive` to `tmux-pane` profiles, plus a `tmuxPane` config block that defaults `layout`, `size`, `focus`, and `interactive` for every pane profile. `focus` selects the pane once it exists, including a reused pane it adopted. `interactive` lets a human share the pane: a prompt they submit is adopted as the turn's prompt instead of failing it as `superseded`, the deadline is re-based on each adopted prompt, and the count is reported as `humanTurns` on the runner status so a shared result is never read as unattended.
 - Add `runner.type: tmux-pane`, which runs a child as an interactive Claude Code session in a tmux pane, with per-child pane identity, hook-driven turn completion, tool events, needs-attention that pauses the turn deadline, stop, interrupt-as-pause, resume, and steer. Async-only and POSIX-only, and refused while a capability ceiling is active because Pi cannot constrain a foreign agent's tools.
 - Add stable-key `runs.steer` to `workflowScript`, with foreground and async transport routing, structured receipts, trace entries, and unawaited-call enforcement (#1186).
 - Document and cover rolling `workflowScript` fanout with `runs.run`, `Promise.race`, `runs.steer`, and `Promise.all` instead of adding separate child-run event helpers (#1187).
