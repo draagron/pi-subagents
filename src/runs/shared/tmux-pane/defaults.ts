@@ -14,15 +14,16 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentRunnerConfig, TmuxPaneDefaultsConfig } from "../../../shared/types.ts";
+import { TMUX_PANE_PERMISSION_MODES, type TmuxPanePermissionMode } from "../../../shared/types.ts";
 import { getAgentDir } from "../../../shared/utils.ts";
 
 /** The subset of a tmux-pane runner block that the config can default. */
 export type TmuxPaneDefaultableOptions = Pick<
 	Extract<AgentRunnerConfig, { type: "tmux-pane" }>,
-	"layout" | "size" | "focus" | "interactive"
+	"layout" | "size" | "focus" | "interactive" | "permissionMode"
 >;
 
-const DEFAULTABLE_KEYS = ["layout", "size", "focus", "interactive", "reuse"] as const;
+const DEFAULTABLE_KEYS = ["layout", "size", "focus", "interactive", "reuse", "permissionMode"] as const;
 
 /**
  * Validate a `tmuxPane` config block, returning the normalized value.
@@ -56,6 +57,13 @@ export function parseTmuxPaneDefaults(value: unknown): TmuxPaneDefaultsConfig | 
 	if (config.reuse !== undefined && typeof config.reuse !== "boolean") {
 		throw new Error("config.tmuxPane.reuse must be a boolean");
 	}
+	if (
+		config.permissionMode !== undefined
+		&& (typeof config.permissionMode !== "string"
+			|| !(TMUX_PANE_PERMISSION_MODES as readonly string[]).includes(config.permissionMode))
+	) {
+		throw new Error(`config.tmuxPane.permissionMode must be one of: ${TMUX_PANE_PERMISSION_MODES.join(", ")}`);
+	}
 
 	return {
 		...(config.layout ? { layout: config.layout as "split" | "window" } : {}),
@@ -63,6 +71,7 @@ export function parseTmuxPaneDefaults(value: unknown): TmuxPaneDefaultsConfig | 
 		...(config.focus !== undefined ? { focus: config.focus as boolean } : {}),
 		...(config.interactive !== undefined ? { interactive: config.interactive as boolean } : {}),
 		...(config.reuse !== undefined ? { reuse: config.reuse as boolean } : {}),
+		...(config.permissionMode ? { permissionMode: config.permissionMode as TmuxPanePermissionMode } : {}),
 	};
 }
 
@@ -92,11 +101,13 @@ export function loadTmuxPaneDefaults(configPath = tmuxPaneConfigPath()): TmuxPan
 /**
  * Layer config defaults under an agent's tmux-pane runner block.
  *
- * Presentation only. `reuse` is resolved separately by `resolveTmuxPaneReuse`,
- * because whether it can apply depends on the child, not just on the profile.
- * Model, permission mode and tool allowlists stay agent-owned entirely: they
- * change what the child is allowed to do, and a global default there would
- * silently re-scope every profile.
+ * Presentation, plus `permissionMode` - the one defaultable field that changes
+ * what a child may do rather than how it looks, because "does an unattended
+ * child stop to ask?" is an operator decision in practice, not a per-agent one.
+ * `reuse` is resolved separately by `resolveTmuxPaneReuse`, because whether it
+ * can apply depends on the child. Model and tool allowlists stay agent-owned:
+ * they describe what an agent IS, and a global default would re-scope every
+ * profile at once.
  */
 export function resolveTmuxPaneOptions(
 	runner: TmuxPaneDefaultableOptions,
@@ -106,11 +117,13 @@ export function resolveTmuxPaneOptions(
 	const size = runner.size ?? defaults.size;
 	const focus = runner.focus ?? defaults.focus;
 	const interactive = runner.interactive ?? defaults.interactive;
+	const permissionMode = runner.permissionMode ?? defaults.permissionMode;
 	return {
 		...(layout ? { layout } : {}),
 		...(size ? { size } : {}),
 		...(focus !== undefined ? { focus } : {}),
 		...(interactive !== undefined ? { interactive } : {}),
+		...(permissionMode ? { permissionMode } : {}),
 	};
 }
 

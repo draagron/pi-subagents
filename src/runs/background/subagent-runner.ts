@@ -1390,7 +1390,7 @@ async function runSingleStepInner(
 			claudeBin: resolveExecutableOnPath("claude") ?? "claude",
 			nodeBin: resolveNodeExecutable(),
 			model: paneConfig.model,
-			permissionMode: paneConfig.permissionMode,
+			permissionMode: paneDefaults.permissionMode,
 			allowedTools: paneConfig.allowedTools,
 			disallowedTools: paneConfig.disallowedTools,
 			addDirs: paneConfig.addDirs,

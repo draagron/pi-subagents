@@ -364,7 +364,7 @@ runner:
 async: true
 ```
 
-`layout`, `size`, `focus`, `interactive`, and `reuse` can also be set once for every pane profile under `tmuxPane` in the extension config; see "Configuration", which also describes the one asymmetry: a `reuse` default is withheld from parallel and worktree children, where the same value written in a profile is refused. Frontmatter wins field by field.
+`layout`, `size`, `focus`, `interactive`, `reuse`, and `permissionMode` can also be set once for every pane profile under `tmuxPane` in the extension config; see "Configuration", which also describes the one asymmetry: a `reuse` default is withheld from parallel and worktree children, where the same value written in a profile is refused. Frontmatter wins field by field.
 
 | Field | Meaning |
 |---|---|

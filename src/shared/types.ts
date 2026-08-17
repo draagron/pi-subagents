@@ -2049,6 +2049,15 @@ export interface TmuxPaneDefaultsConfig {
 	focus?: boolean;
 	interactive?: boolean;
 	/**
+	 * Default permission mode for every pane agent, including ones added later.
+	 *
+	 * The one defaultable field that changes what a child may DO rather than how
+	 * it is presented, so it is worth stating plainly: this is the setting that
+	 * decides whether an unattended child stops to ask. A profile still overrides
+	 * it, and an absent value leaves Claude to its own default.
+	 */
+	permissionMode?: TmuxPanePermissionMode;
+	/**
 	 * Default `reuse`. Withheld from parallel and worktree children rather than
 	 * refusing them: a default states a preference for the common case, while
 	 * `reuse` in a profile asserts something about that agent and is still

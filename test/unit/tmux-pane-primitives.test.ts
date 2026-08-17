@@ -845,8 +845,17 @@ describe("tmux-pane focus", () => {
 describe("tmux-pane config defaults", () => {
 	it("lets agent frontmatter win over config, including an explicit false", () => {
 		assert.deepEqual(
-			resolveTmuxPaneOptions({ layout: "window", focus: false }, { layout: "split", size: "45%", focus: true, interactive: true }),
-			{ layout: "window", size: "45%", focus: false, interactive: true },
+			resolveTmuxPaneOptions(
+				{ layout: "window", focus: false },
+				{ layout: "split", size: "45%", focus: true, interactive: true, permissionMode: "auto" },
+			),
+			{ layout: "window", size: "45%", focus: false, interactive: true, permissionMode: "auto" },
+		);
+		// permissionMode decides whether an unattended child stops to ask, so a
+		// profile that names one must never be quietly widened by the config.
+		assert.deepEqual(
+			resolveTmuxPaneOptions({ permissionMode: "plan" }, { permissionMode: "bypassPermissions" }),
+			{ permissionMode: "plan" },
 		);
 	});
 
@@ -863,6 +872,7 @@ describe("tmux-pane config defaults", () => {
 			[{ focus: "yes" }, /focus must be a boolean/],
 			[{ interactive: 1 }, /interactive must be a boolean/],
 			[{ reuse: "always" }, /reuse must be a boolean/],
+			[{ permissionMode: "yolo" }, /permissionMode must be one of: acceptEdits, auto/],
 			[{ model: "opus" }, /config\.tmuxPane\.model is not supported/],
 		];
 		for (const [value, expected] of cases) {

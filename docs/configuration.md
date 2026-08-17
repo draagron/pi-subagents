@@ -100,7 +100,8 @@ Set `enabled` to `false` (or remove the block) as a kill switch. In that state, 
     "size": "40%",
     "focus": false,
     "interactive": true,
-    "reuse": true
+    "reuse": true,
+    "permissionMode": "auto"
   }
 }
 ```
@@ -114,8 +115,11 @@ Defaults for every agent profile with `runner.type: tmux-pane`. How a pane is pr
 | `focus` | `false` | Move the cursor into the pane once it exists. Leave `false` to see the pane without losing your place in pi. |
 | `interactive` | `false` | Let a human type into the pane while the run owns it. See "tmux pane agent profiles" in the tool reference for what this trades away. |
 | `reuse` | `false` | One long-lived pane per agent, carrying its Claude conversation across runs, instead of a pane per child. |
+| `permissionMode` | Claude's own default | One of `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`. Passed to Claude as `--permission-mode`. |
 
-Agent frontmatter wins field by field, and `false` in a profile is how it opts out of a default set here. Nothing else is defaultable: `model`, `permissionMode`, tool allowlists and `extraArgs` change what the child may *do*, and a global default there would silently re-scope every profile.
+Agent frontmatter wins field by field, and `false` in a profile is how it opts out of a default set here. `model`, tool allowlists and `extraArgs` are **not** defaultable: they describe what an agent *is*, and a global default would re-scope every profile at once.
+
+`permissionMode` is the one exception to that rule, because whether an unattended child stops to ask is a property of how you work rather than of the agent. It is also the field with real consequences, so two notes: a default here applies to every pane agent including ones added later, and `auto` is not "no checks" — Claude's auto mode keeps a classifier that hard-denies an action it judges risky, which surfaces as a failed tool call rather than as needs-attention. `dontAsk` denies instead of asking, so it is not the way to stop prompts. Auto mode availability is per-model, and Claude falls back to its default mode with a notice in the pane when it is unavailable.
 
 ### Developing a pane agent
 
